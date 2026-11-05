@@ -6,6 +6,7 @@ type LeaveType = 'annual' | 'half_am' | 'half_pm';
 type Status = 'pending' | 'approved' | 'rejected' | 'cancelled';
 type Request = { id: number; employeeId: number; employeeName: string; department: string; startDate: string; endDate: string; type: LeaveType; days: number; reason: string; status: Status; createdAt: string; reviewNote: string };
 type Bootstrap = { year: number; asOf: string; employees: Employee[]; requests: Request[] };
+type DesktopInfo = { standalone: boolean; quitToken?: string; dataDirectory?: string };
 type Page = 'dashboard' | 'employees' | 'requests' | 'calendar';
 type Modal = { type: 'request'; employeeId?: number } | { type: 'employee'; employee?: Employee } | { type: 'review'; request: Request; status: 'rejected' | 'cancelled' } | null;
 const statusLabels: Record<Status, string> = { pending: '승인 대기', approved: '승인 완료', rejected: '반려', cancelled: '취소' };
@@ -50,6 +51,10 @@ export default function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [desktop, setDesktop] = useState<DesktopInfo>({ standalone: false });
+  const [confirmQuit, setConfirmQuit] = useState(false);
+  const [quitting, setQuitting] = useState(false);
+  const [closed, setClosed] = useState(false);
   const latestLoad = useRef(0);
   async function load(selectedAsOf = asOf) {
     const ticket = ++latestLoad.current;
@@ -61,7 +66,21 @@ export default function App() {
     finally { if (ticket === latestLoad.current) setLoading(false); }
   }
   useEffect(() => { setLoading(true); void load(asOf); }, [asOf]);
+  useEffect(() => {
+    void api<DesktopInfo>('/api/desktop-info').then(setDesktop).catch(() => {});
+  }, []);
   useEffect(() => { if (!toast) return; const id = window.setTimeout(() => setToast(null), 4000); return () => clearTimeout(id); }, [toast]);
+  async function quitDesktop() {
+    if (!desktop.quitToken || quitting) return;
+    setQuitting(true);
+    try {
+      await api('/api/desktop-quit', { method: 'POST', headers: { 'X-Onhyu-Token': desktop.quitToken }, body: '{}' });
+      setClosed(true);
+    } catch (error) {
+      setToast({ text: (error as Error).message, error: true });
+      setConfirmQuit(false);
+    } finally { setQuitting(false); }
+  }
   function navigate(next: Page) { setPage(next); setSearch(''); setDepartment('all'); setStatusFilter('all'); }
   async function mutate(path: string, method: string, payload: unknown, success: string) {
     setBusy(true);
@@ -95,6 +114,7 @@ export default function App() {
     const link = document.createElement('a'); link.href = url; link.download = `온휴_휴가내역_${year}.csv`; link.click(); URL.revokeObjectURL(url);
   }
   const nav = [{ page: 'dashboard' as Page, icon: LayoutDashboard, name: '대시보드' }, { page: 'employees' as Page, icon: UsersRound, name: '직원 관리' }, { page: 'requests' as Page, icon: CalendarDays, name: '휴가 내역' }, { page: 'calendar' as Page, icon: CalendarDays, name: '휴가 캘린더' }];
+  if (closed) return <main className="desktop-closed"><span className="brand-mark"><Leaf size={28} /></span><h1>온휴를 종료했습니다.</h1><p>직원과 휴가 자료가 이 컴퓨터에 저장되었습니다.<br />이 브라우저 탭을 닫으셔도 됩니다.</p><p>다시 사용하려면 Onhyu.exe를 더블클릭하세요.</p></main>;
   return <div className="app-shell">
     <aside className="sidebar">
       <a className="brand" href="#" onClick={e => { e.preventDefault(); navigate('dashboard'); }} aria-label="온휴 대시보드"><span className="brand-mark"><Leaf size={24} /></span><span className="brand-copy">온휴<span>팀을 위한 편안한 휴가 관리</span></span></a>
@@ -127,11 +147,13 @@ export default function App() {
           {page === 'calendar' && <section className="panel calendar-panel"><div className="calendar-toolbar"><div className="calendar-title"><button className="icon-button" aria-label="이전 달" onClick={() => { if (month === 0) { setCalendarYear(y => y - 1); setMonth(11); } else setMonth(m => m - 1); }}><ChevronLeft size={19} /></button><h2>{calendarYear}년 {month + 1}월</h2><button className="icon-button" aria-label="다음 달" onClick={() => { if (month === 11) { setCalendarYear(y => y + 1); setMonth(0); } else setMonth(m => m + 1); }}><ChevronRight size={19} /></button><button className="button secondary small" onClick={() => { setCalendarYear(currentYear); setMonth(currentMonth); }}>오늘</button></div><div className="legend"><span><i className="legend-dot" />승인 완료</span><span><i className="legend-dot pending" />승인 대기</span></div></div><Calendar year={calendarYear} month={month} requests={requests} /><div className="panel-footnote"><CircleHelp size={13} />조회 기준일의 입사일별 연차 기간에 해당하는 일정입니다. 다른 기간은 상단 기준일을 변경해 주세요.</div></section>}
         </>}
         <footer className="page-footer"><span><Leaf size={13} />온휴 · 우리 팀의 건강한 쉼을 위해</span><span>입사일 기준 연차 관리 · 토·일 제외, 공휴일 별도 확인</span></footer>
+        {desktop.standalone && <div className="desktop-footer"><div><strong>이 컴퓨터에 자동 저장됩니다.</strong><span className="desktop-data-path">저장 폴더: {desktop.dataDirectory}</span></div><button className="button secondary" disabled={busy || quitting} onClick={() => setConfirmQuit(true)}>프로그램 종료</button></div>}
       </div>
     </main>
     <nav className="mobile-nav" aria-label="주 메뉴">{nav.map(item => <button key={item.page} className={`mobile-nav-button ${page === item.page ? 'active' : ''}`} aria-current={page === item.page ? 'page' : undefined} onClick={() => navigate(item.page)}><item.icon size={20} /><span>{item.name}</span></button>)}</nav>
     {toast && <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <CircleHelp size={18} /> : <CheckCheck size={18} />}{toast.text}<button aria-label="알림 닫기" onClick={() => setToast(null)}><X size={15} /></button></div>}
     {modal && <FormModal modal={modal} employees={employees} asOf={asOf} busy={busy} onClose={() => setModal(null)} onSubmit={async (path, method, payload, success) => { await mutate(path, method, payload, success); setModal(null); }} />}
+    {confirmQuit && <div className="modal-backdrop"><section className="modal desktop-quit-dialog" role="alertdialog" aria-modal="true" aria-labelledby="quit-title"><div className="modal-header"><h2 id="quit-title">온휴를 종료할까요?</h2></div><p>등록한 자료는 저장되어 다음 실행 때 다시 열립니다.</p><div className="modal-actions"><button className="button secondary" autoFocus disabled={quitting} onClick={() => setConfirmQuit(false)}>계속 사용</button><button className="button primary" disabled={quitting} onClick={() => void quitDesktop()}>{quitting ? '종료 중…' : '프로그램 종료'}</button></div></section></div>}
   </div>;
 }
 function Stat({ icon, tone, label, value, unit, caption, detail, onClick }: { icon: ReactNode; tone: string; label: string; value: number; unit: string; caption: string; detail: string; onClick?: () => void }) { return <section className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon tone-${tone}`}>{icon}</span></div><div className="stat-value">{dayCount(value)}<span>{unit}</span></div><p className="stat-caption">{caption}</p>{onClick ? <button className="stat-sub" onClick={onClick}>{detail}<ArrowUpRight size={13} /></button> : <span className="stat-sub">{detail}<ArrowDownRight size={13} /></span>}</section>; }

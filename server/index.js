@@ -107,7 +107,7 @@ function allowanceValue(value) {
   return value;
 }
 
-export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', 'leave.sqlite'), seed = process.env.SEED_DEMO !== '0' } = {}) {
+export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', 'leave.sqlite'), seed = process.env.SEED_DEMO !== '0', staticDir = join(ROOT, 'dist'), configureApp } = {}) {
   if (dbPath !== ':memory:') mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec(`
@@ -258,6 +258,9 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   app.use(express.json({ limit: '32kb' }));
   app.locals.db = db;
   app.locals.close = () => db.close();
+  if (configureApp) configureApp(app);
+
+  app.get('/api/desktop-info', (_req, res) => res.json({ standalone: false }));
 
   app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
   app.get('/api/bootstrap', (req, res) => {
@@ -365,7 +368,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   });
 
   app.use('/api', (_req, _res, next) => next(new ApiError(404, 'API 경로를 찾을 수 없습니다.')));
-  const dist = join(ROOT, 'dist');
+  const dist = resolve(staticDir);
   if (existsSync(join(dist, 'index.html'))) {
     app.use(express.static(dist));
     app.get('/{*path}', (_req, res) => res.sendFile(join(dist, 'index.html')));
@@ -380,7 +383,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   return app;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (typeof ONHYU_BUNDLED === 'undefined' && process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const app = createApp();
   const port = Number(process.env.PORT || 3001);
   const host = process.env.HOST || '127.0.0.1';
