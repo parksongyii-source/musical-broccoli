@@ -3,6 +3,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { calculateEntitlement } from './entitlement.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TYPES = new Set(['annual', 'half_am', 'half_pm']);
@@ -36,7 +38,7 @@ export function seoulToday() {
 
 function validYear(value = seoulYear()) {
   const year = Number(value);
-  if (!Number.isInteger(year) || year < 2000 || year > 2100) fail('연도는 2000~2100 범위로 입력해 주세요.');
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) fail('연도는 1900~2100 범위로 입력해 주세요.');
   return year;
 }
 
@@ -107,7 +109,12 @@ function allowanceValue(value) {
   return value;
 }
 
-export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', 'leave.sqlite'), seed = process.env.SEED_DEMO !== '0', staticDir = join(ROOT, 'dist'), configureApp } = {}) {
+function allowanceMode(value) {
+  if (!['auto', 'manual'].includes(value)) fail('연차 계산 방식은 자동 또는 직접 조정을 선택해 주세요.');
+  return value;
+}
+
+export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', 'leave.sqlite'), seed = process.env.SEED_DEMO !== '0', staticDir = join(ROOT, 'dist'), configureApp, today = seoulToday } = {}) {
   if (dbPath !== ':memory:') mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec(`
@@ -118,7 +125,8 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       name TEXT NOT NULL,
       department TEXT NOT NULL,
       position TEXT NOT NULL DEFAULT '',
-      join_date TEXT NOT NULL
+      join_date TEXT NOT NULL,
+      allowance_mode TEXT NOT NULL DEFAULT 'auto' CHECK(allowance_mode IN ('auto','manual'))
     );
     CREATE TABLE IF NOT EXISTS allowances (
       employee_id INTEGER NOT NULL REFERENCES employees(id),
@@ -140,6 +148,28 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     );
     CREATE INDEX IF NOT EXISTS requests_employee_date ON requests(employee_id, start_date, end_date);
   `);
+  // Preserve the original employee, allowance and request records when upgrading
+  // a 0.2 database. Stored adjustments remain available when manual mode is used.
+  let migrationBackupPath = null;
+  if (!db.prepare('PRAGMA table_info(employees)').all().some(column => column.name === 'allowance_mode')) {
+    try {
+      if (dbPath !== ':memory:') {
+        migrationBackupPath = `${resolve(dbPath)}.before-auto-${Date.now()}-${randomUUID()}.sqlite`;
+        db.prepare('VACUUM INTO ?').run(migrationBackupPath);
+        const snapshot = new DatabaseSync(migrationBackupPath, { readOnly: true });
+        try {
+          if (snapshot.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw new Error('백업 파일 검증에 실패했습니다.');
+          for (const table of ['employees', 'allowances', 'requests']) {
+            if (snapshot.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count !== db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count) throw new Error('백업 자료 수가 원본과 일치하지 않습니다.');
+          }
+        } finally { snapshot.close(); }
+      }
+      db.exec("ALTER TABLE employees ADD COLUMN allowance_mode TEXT NOT NULL DEFAULT 'auto' CHECK(allowance_mode IN ('auto','manual'))");
+    } catch (error) {
+      db.close();
+      throw new Error(`기존 자료를 안전하게 백업·업데이트하지 못했습니다: ${error.message}`);
+    }
+  }
 
   function transaction(fn) {
     db.exec('BEGIN IMMEDIATE');
@@ -151,9 +181,20 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     if (!employee) fail('직원을 찾을 수 없습니다.', 404);
     return employee;
   }
-  function allowance(id, period) {
-    if (!period.active) return 0;
-    return db.prepare('SELECT days FROM allowances WHERE employee_id = ? AND year = ?').get(id, period.allowanceYear)?.days ?? 0;
+  function allowanceDetails(employee, period, asOf) {
+    const automatic = calculateEntitlement(employee.join_date, asOf);
+    const priorManualAllowance = db.prepare('SELECT days FROM allowances WHERE employee_id = ? AND year = ?').get(employee.id, period.allowanceYear)?.days ?? null;
+    const hasManualOverride = employee.allowance_mode === 'manual' && priorManualAllowance !== null;
+    const configuredAllowance = hasManualOverride ? priorManualAllowance : automatic.automaticAllowance;
+    return {
+      ...automatic, priorManualAllowance, hasManualOverride, configuredAllowance,
+      annualAllowance: period.active ? configuredAllowance : 0,
+      allowanceMode: employee.allowance_mode,
+      calculationBasis: hasManualOverride ? `관리자 직접 조정 · 해당 기간 ${configuredAllowance}일` : automatic.calculationBasis,
+    };
+  }
+  function allowance(id, period, asOf = period.periodStart) {
+    return allowanceDetails(employeeExists(id), period, asOf).annualAllowance;
   }
   function totals(id, period, excludeId = 0) {
     if (!period.active) return { used: 0, pending: 0 };
@@ -165,15 +206,16 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   }
   function employeeView(raw, asOf) {
     const period = employmentPeriod(raw.join_date, asOf);
-    const configuredAllowance = db.prepare('SELECT days FROM allowances WHERE employee_id = ? AND year = ?').get(raw.id, period.allowanceYear)?.days ?? 0;
-    const assigned = allowance(raw.id, period);
+    const details = allowanceDetails(raw, period, asOf);
+    const assigned = details.annualAllowance;
     const balance = totals(raw.id, period);
     return {
       id: raw.id, name: raw.name, department: raw.department, position: raw.position,
       joinDate: raw.join_date, annualAllowance: assigned, usedDays: balance.used,
       pendingDays: balance.pending, remainingDays: assigned - balance.used,
       periodStart: period.periodStart, periodEnd: period.periodEnd, allowanceYear: period.allowanceYear,
-      configuredAllowance,
+      ...details,
+      overdrawnDays: Math.max(0, balance.used + balance.pending - assigned),
     };
   }
   function requestView(raw) {
@@ -189,9 +231,14 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     if (!request) fail('휴가 신청을 찾을 수 없습니다.', 404);
     return request;
   }
-  function ensureBalance(id, period, days, excludeId = 0) {
+  function ensureBalance(id, period, days, excludeId = 0, requestDate = period.periodStart) {
     const { used, pending } = totals(id, period, excludeId);
-    if (used + pending + days > allowance(id, period)) fail('해당 입사일 기준 기간의 신청 가능한 잔여 연차가 부족합니다. 승인 대기 중인 휴가도 포함됩니다.', 409);
+    const employee = employeeExists(id);
+    const completedYears = period.allowanceYear - Number(employee.join_date.slice(0, 4));
+    // Annual grants are known for the requested anniversary cycle. A new hire's
+    // monthly credits must already have accrued, rather than borrowing future months.
+    const asOf = completedYears < 1 ? (requestDate < today() ? requestDate : today()) : period.periodStart;
+    if (used + pending + days > allowance(id, period, asOf)) fail('해당 입사일 기준 기간의 신청 가능한 잔여 연차가 부족합니다. 아직 발생하지 않은 월별 연차와 승인 대기 일수를 확인해 주세요.', 409);
   }
   function ensureNoOverlap(id, start, end, type, excludeId = 0) {
     const others = db.prepare(`SELECT * FROM requests WHERE employee_id = ? AND status IN ('pending','approved')
@@ -257,14 +304,23 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   app.disable('x-powered-by');
   app.use(express.json({ limit: '32kb' }));
   app.locals.db = db;
+  app.locals.migrationBackupPath = migrationBackupPath;
   app.locals.close = () => db.close();
   if (configureApp) configureApp(app);
 
   app.get('/api/desktop-info', (_req, res) => res.json({ standalone: false }));
 
   app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+  app.get('/api/entitlement', (req, res) => {
+    const joinDate = req.query.joinDate;
+    const asOf = req.query.asOf ?? today();
+    dateValue(joinDate, '입사일');
+    dateValue(asOf, '조회 기준일');
+    const period = employmentPeriod(joinDate, asOf);
+    res.json({ ...calculateEntitlement(joinDate, asOf), ...period, joinDate, asOf });
+  });
   app.get('/api/bootstrap', (req, res) => {
-    const asOf = req.query.asOf ?? (req.query.year === undefined ? seoulToday() : `${validYear(req.query.year)}-12-31`);
+    const asOf = req.query.asOf ?? (req.query.year === undefined ? today() : `${validYear(req.query.year)}-12-31`);
     dateValue(asOf, '조회 기준일');
     const year = Number(asOf.slice(0, 4));
     const employees = db.prepare('SELECT * FROM employees ORDER BY id').all().map((raw) => employeeView(raw, asOf));
@@ -282,16 +338,18 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     const department = text(body.department, '부서', { max: 60 });
     const position = text(body.position, '직책', { required: false, max: 60 });
     dateValue(body.joinDate, '입사일');
-    const asOf = body.asOf ?? seoulToday();
+    const asOf = body.asOf ?? today();
     const selectedPeriod = employmentPeriod(body.joinDate, asOf);
-    const year = validYear(body.allowanceYear ?? body.year ?? selectedPeriod.allowanceYear);
+    const mode = allowanceMode(has(body, 'allowanceMode') ? body.allowanceMode : (has(body, 'annualAllowance') ? 'manual' : 'auto'));
+    const year = validYear(mode === 'auto' ? selectedPeriod.allowanceYear : (body.allowanceYear ?? body.year ?? selectedPeriod.allowanceYear));
     if (year < Number(body.joinDate.slice(0, 4))) fail('입사 이전 기간에는 연차를 부여할 수 없습니다.');
-    const assigned = allowanceValue(body.annualAllowance ?? 15);
+    const viewDate = body.asOf ?? ((body.allowanceYear ?? body.year) === undefined ? asOf : cycleAtYear(body.joinDate, year).periodStart);
+    const assigned = mode === 'manual' ? allowanceValue(body.annualAllowance ?? calculateEntitlement(body.joinDate, viewDate).automaticAllowance) : null;
     const employee = transaction(() => {
-      const result = db.prepare('INSERT INTO employees(name,department,position,join_date) VALUES(?,?,?,?)').run(name, department, position, body.joinDate);
+      const result = db.prepare('INSERT INTO employees(name,department,position,join_date,allowance_mode) VALUES(?,?,?,?,?)').run(name, department, position, body.joinDate, mode);
       const id = Number(result.lastInsertRowid);
-      db.prepare('INSERT INTO allowances(employee_id,year,days) VALUES(?,?,?)').run(id, year, assigned);
-      return employeeView(employeeExists(id), body.asOf ?? cycleAtYear(body.joinDate, year).periodStart);
+      if (mode === 'manual') db.prepare('INSERT INTO allowances(employee_id,year,days) VALUES(?,?,?)').run(id, year, assigned);
+      return employeeView(employeeExists(id), viewDate);
     });
     res.status(201).json(employee);
   });
@@ -305,21 +363,25 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     const position = has(body, 'position') ? text(body.position, '직책', { required: false, max: 60 }) : previous.position;
     const joinDate = has(body, 'joinDate') ? body.joinDate : previous.join_date;
     dateValue(joinDate, '입사일');
-    const asOf = body.asOf ?? seoulToday();
+    const asOf = body.asOf ?? today();
     const selectedPeriod = employmentPeriod(joinDate, asOf);
     const year = validYear(joinDate !== previous.join_date ? selectedPeriod.allowanceYear : (body.allowanceYear ?? body.year ?? selectedPeriod.allowanceYear));
     if (year < Number(joinDate.slice(0, 4))) fail('입사 이전 기간에는 연차를 부여할 수 없습니다.');
     const period = cycleAtYear(joinDate, year);
-    const assigned = has(body, 'annualAllowance') ? allowanceValue(body.annualAllowance) : allowance(id, period);
+    const mode = allowanceMode(has(body, 'allowanceMode') ? body.allowanceMode : (has(body, 'annualAllowance') ? 'manual' : previous.allowance_mode));
+    const assigned = mode === 'manual' && has(body, 'annualAllowance') ? allowanceValue(body.annualAllowance) : null;
     const employee = transaction(() => {
       const { used, pending } = totals(id, period);
-      if (assigned < used + pending) fail('부여 연차는 사용한 연차와 승인 대기 일수의 합계보다 작을 수 없습니다.', 409);
+      const transitioningToManual = mode === 'manual' && previous.allowance_mode !== 'manual';
+      const retained = db.prepare('SELECT days FROM allowances WHERE employee_id = ? AND year = ?').get(id, year)?.days;
+      const candidate = assigned ?? (transitioningToManual ? retained ?? calculateEntitlement(joinDate, asOf).automaticAllowance : null);
+      if (candidate !== null && candidate < used + pending) fail('부여 연차는 사용한 연차와 승인 대기 일수의 합계보다 작을 수 없습니다.', 409);
       const earliest = db.prepare("SELECT MIN(start_date) AS firstDate FROM requests WHERE employee_id = ? AND status IN ('pending','approved')").get(id).firstDate;
       if (earliest && joinDate !== previous.join_date) fail('승인 또는 대기 중인 휴가가 있는 직원의 입사일은 변경할 수 없습니다. 기존 휴가를 먼저 정리해 주세요.', 409);
-      db.prepare('UPDATE employees SET name=?,department=?,position=?,join_date=? WHERE id=?').run(name, department, position, joinDate, id);
-      db.prepare(`INSERT INTO allowances(employee_id,year,days) VALUES(?,?,?)
+      db.prepare('UPDATE employees SET name=?,department=?,position=?,join_date=?,allowance_mode=? WHERE id=?').run(name, department, position, joinDate, mode, id);
+      if (assigned !== null) db.prepare(`INSERT INTO allowances(employee_id,year,days) VALUES(?,?,?)
         ON CONFLICT(employee_id,year) DO UPDATE SET days=excluded.days`).run(id, year, assigned);
-      return employeeView(employeeExists(id), body.asOf ?? period.periodStart);
+      return employeeView(employeeExists(id), body.asOf ?? ((body.allowanceYear ?? body.year) === undefined ? asOf : period.periodStart));
     });
     res.json(employee);
   });
@@ -335,7 +397,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     const period = employmentPeriod(employee.join_date, body.startDate);
     if (body.endDate > period.periodEnd) fail('입사일 기준 연차 기간이 바뀌는 날짜를 걸쳐 신청할 수 없습니다. 기간별로 나누어 신청해 주세요.');
     const request = transaction(() => {
-      ensureBalance(id, period, days);
+      ensureBalance(id, period, days, 0, body.startDate);
       ensureNoOverlap(id, body.startDate, body.endDate, body.type);
       const result = db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at)
         VALUES(?,?,?,?,?,?,'pending',?)`).run(id, body.startDate, body.endDate, body.type, days, reason, new Date().toISOString());
@@ -358,7 +420,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
         const employee = employeeExists(previous.employee_id);
         const period = employmentPeriod(employee.join_date, previous.start_date);
         if (!period.active || previous.end_date > period.periodEnd) fail('이 휴가는 입사일 기준 기간을 벗어납니다. 취소 후 기간별로 다시 신청해 주세요.', 409);
-        ensureBalance(previous.employee_id, period, previous.days, id);
+        ensureBalance(previous.employee_id, period, previous.days, id, previous.start_date);
         ensureNoOverlap(previous.employee_id, previous.start_date, previous.end_date, previous.type, id);
       }
       db.prepare('UPDATE requests SET status=?,review_note=? WHERE id=?').run(body.status, note, id);

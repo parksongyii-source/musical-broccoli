@@ -158,8 +158,7 @@ test('requests and annual allowances are isolated by each employment period', as
   const { employee, apply, request, bootstrap } = await fixture(t);
   const staff = await employee(10);
   assert.equal((await apply(staff.id)).status, 201);
-  assert.equal((await bootstrap('2027-11-05')).employees[0].annualAllowance, 0);
-  assertClientError(await apply(staff.id, { startDate: '2027-01-04', endDate: '2027-01-04' }));
+  assert.equal((await bootstrap('2027-11-05')).employees[0].annualAllowance, 16);
   const update = await request('PATCH', `/api/employees/${staff.id}`, { annualAllowance: 20, year: 2027 });
   assert.equal(update.status, 200, JSON.stringify(update.body));
   const current = await bootstrap('2026-11-05');
