@@ -5,13 +5,14 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { calculateEntitlement } from './entitlement.js';
+import { MAX_IMPORT_EMPLOYEES, previewEmployeeImport } from './employee-import.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TYPES = new Set(['annual', 'half_am', 'half_pm']);
 const ACTIVE = new Set(['pending', 'approved']);
 
 class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, details) { super(message); this.status = status; this.details = details; }
 }
 
 function fail(message, status = 400) { throw new ApiError(status, message); }
@@ -302,7 +303,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '32kb' }));
+  app.use(express.json({ limit: '512kb' }));
   app.locals.db = db;
   app.locals.migrationBackupPath = migrationBackupPath;
   app.locals.close = () => db.close();
@@ -330,6 +331,35 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       return asOf >= period.joinDate && raw.start_date >= period.periodStart && raw.start_date <= period.periodEnd;
     }).map(requestView);
     res.json({ year, asOf, employees, requests });
+  });
+
+  function importPreview(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.employees)) fail('등록할 직원 목록을 입력해 주세요.');
+    if (body.employees.length < 1 || body.employees.length > MAX_IMPORT_EMPLOYEES) fail(`직원은 한 번에 1~${MAX_IMPORT_EMPLOYEES}명까지 등록할 수 있습니다.`);
+    const asOf = body.asOf ?? today();
+    dateValue(asOf, '조회 기준일');
+    const existing = db.prepare('SELECT name,department,join_date FROM employees').all();
+    return { ...previewEmployeeImport(body.employees, existing, asOf, employmentPeriod), asOf };
+  }
+
+  app.post('/api/employees/import-preview', (req, res) => {
+    res.json(importPreview(req.body));
+  });
+
+  app.post('/api/employees/bulk', (req, res) => {
+    const result = transaction(() => {
+      // Recheck current database contents under the write lock; a prior preview
+      // is not authorization to insert stale or newly duplicated rows.
+      const preview = importPreview(req.body);
+      if (!preview.canImport) throw new ApiError(422, '오류 또는 중복 행을 수정한 뒤 다시 등록해 주세요. 아직 등록된 직원은 없습니다.', preview);
+      const insert = db.prepare("INSERT INTO employees(name,department,position,join_date,allowance_mode) VALUES(?,?,?,?,'auto')");
+      const employees = preview.rows.map(({ employee }) => {
+        const result = insert.run(employee.name, employee.department, employee.position, employee.joinDate);
+        return employeeView(employeeExists(Number(result.lastInsertRowid)), preview.asOf);
+      });
+      return { imported: employees.length, employees };
+    });
+    res.status(201).json(result);
   });
 
   app.post('/api/employees', (req, res) => {
@@ -436,7 +466,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     app.get('/{*path}', (_req, res) => res.sendFile(join(dist, 'index.html')));
   }
   app.use((error, _req, res, _next) => {
-    if (error instanceof ApiError) return res.status(error.status).json({ error: error.message });
+    if (error instanceof ApiError) return res.status(error.status).json({ error: error.message, ...error.details });
     if (error.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON 요청 형식이 올바르지 않습니다.' });
     if (error.type === 'entity.too.large') return res.status(413).json({ error: '요청 데이터가 너무 큽니다.' });
     console.error('API error:', error.message);

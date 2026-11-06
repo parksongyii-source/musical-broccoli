@@ -13,6 +13,14 @@ Windows 10/11 64비트용입니다. Node.js 설치나 명령어 입력이 필요
 2. Onhyu.exe를 더블클릭합니다.
 3. 자동으로 열린 브라우저에서 직원을 등록하면 됩니다.
 
+직원 여러 명을 한 번에 등록하려면:
+1. 직원 관리에서 '직원 일괄 등록'을 누릅니다.
+2. 엑셀의 직원 목록을 복사해 붙여넣거나 CSV 파일을 선택합니다.
+3. 검토 화면에서 날짜·중복·오류를 확인하고 등록합니다.
+동봉된 직원등록양식.csv 또는 화면의 양식 다운로드를 사용할 수 있습니다.
+이름과 입사일은 필수이며, 부서는 비워두면 미지정으로 등록됩니다.
+등록한 직원의 연차는 입사일 기준으로 자동 계산됩니다.
+
 처음에는 빈 직원 목록으로 시작합니다.
 실행 중 작은 콘솔 창이 함께 열립니다. 이 창은 실행 중인 프로그램의 일부입니다.
 종료하려면 화면 아래 '프로그램 종료'를 누르거나 콘솔 창을 닫으세요.
@@ -50,8 +58,9 @@ output.parent.mkdir(exist_ok=True)
 with ZipFile(output,'w',ZIP_DEFLATED,compresslevel=9) as z:
  for name in files:z.write(distribution/name,'onhyu-windows/'+name)
  z.writestr('onhyu-windows/처음사용.txt',guide)
+ z.write(root/'downloads/employee-import-template.csv','onhyu-windows/직원등록양식.csv')
 with ZipFile(output) as z:
  assert z.testzip() is None
- assert len(z.namelist())==5
+ assert len(z.namelist())==6
  assert hashlib.sha256(z.read('onhyu-windows/Onhyu.exe')).hexdigest()==meta['applicationSHA256']
 print(json.dumps({'file':str(output),'bytes':output.stat().st_size,'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'archiveIntegrity':'passed','windowsExeSHA256':meta['applicationSHA256']},ensure_ascii=False))

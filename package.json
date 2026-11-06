@@ -1,6 +1,6 @@
 {
   "name": "onhyu-leave-manager",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,7 +10,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "tsc -b && vite build",
     "start": "node server/index.js",
-    "test": "node --test server/*.test.js desktop/*.test.js",
+    "test": "node --test server/*.test.js desktop/*.test.js src/*.test.ts",
     "package:windows": "npm run build && node scripts/package-desktop.mjs --target=win-x64 && python3 scripts/zip-windows.py",
     "test:desktop": "node --test desktop/*.test.js"
   },
