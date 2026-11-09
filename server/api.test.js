@@ -64,23 +64,23 @@ test('fresh databases contain no employees or requests when demo seeding is disa
   assert.deepEqual(data.requests, []);
 });
 
-test('annual leave counts weekdays, reserves balance, and approval moves reserved days to used days', async t => {
+test('annual leave counts all selected calendar days, reserves balance, and approval moves reserved days to used days', async t => {
   const { employee, apply, request, bootstrap } = await fixture(t);
   const staff = await employee();
   const leave = await apply(staff.id, { startDate: '2026-11-06', endDate: '2026-11-09' });
   assert.equal(leave.status, 201, JSON.stringify(leave.body));
-  assert.equal(leave.body.days, 2);
+  assert.equal(leave.body.days, 4);
   assert.equal(leave.body.status, 'pending');
   let snapshot = await bootstrap();
-  assert.equal(snapshot.employees[0].pendingDays, 2);
+  assert.equal(snapshot.employees[0].pendingDays, 4);
   assert.equal(snapshot.employees[0].usedDays, 0);
   assert.equal(snapshot.employees[0].remainingDays, 15);
   const approval = await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'approved' });
   assert.equal(approval.status, 200, JSON.stringify(approval.body));
   snapshot = await bootstrap();
   assert.equal(snapshot.employees[0].pendingDays, 0);
-  assert.equal(snapshot.employees[0].usedDays, 2);
-  assert.equal(snapshot.employees[0].remainingDays, 13);
+  assert.equal(snapshot.employees[0].usedDays, 4);
+  assert.equal(snapshot.employees[0].remainingDays, 11);
 });
 
 test('opposite half-days can share a weekday but duplicate halves and full-day overlap cannot', async t => {
@@ -128,16 +128,14 @@ test('cancelling approved leave restores the balance and blocks unsupported stat
   assertClientError(await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'approved' }));
 });
 
-test('invalid calendar dates, reversed ranges, cross-period requests, and nonworking half-days are rejected', async t => {
+test('invalid calendar dates, reversed ranges, cross-period requests, and multiple-day half-days are rejected', async t => {
   const { employee, apply, bootstrap } = await fixture(t);
   const staff = await employee();
   for (const dates of [
     { startDate: '2026-02-30', endDate: '2026-02-30' },
     { startDate: '2026-11-04', endDate: '2026-11-02' },
     { startDate: '2026-12-31', endDate: '2027-01-01' },
-    { startDate: '2026-11-07', endDate: '2026-11-07', type: 'half_am' },
     { startDate: '2026-11-02', endDate: '2026-11-03', type: 'half_pm' },
-    { startDate: '2026-11-07', endDate: '2026-11-08' },
   ]) assertClientError(await apply(staff.id, dates));
   assert.deepEqual((await bootstrap()).requests, []);
 });
@@ -287,12 +285,12 @@ test('leave may cross December to January inside an employment period but cannot
     startDate: '2026-12-31', endDate: '2027-01-04',
   });
   assert.equal(spanningNewYear.status, 201, JSON.stringify(spanningNewYear.body));
-  assert.equal(spanningNewYear.body.days, 3);
+  assert.equal(spanningNewYear.body.days, 5);
   const data = await bootstrap('2027-01-04');
   assert.equal(data.employees[0].periodStart, '2026-03-01');
   assert.equal(data.employees[0].periodEnd, '2027-02-28');
   assert.equal(data.employees[0].allowanceYear, 2026);
-  assert.equal(data.employees[0].pendingDays, 3);
+  assert.equal(data.employees[0].pendingDays, 5);
   assert.equal(data.requests[0].id, spanningNewYear.body.id);
   assertClientError(await apply(staff.id, { startDate: '2027-02-26', endDate: '2027-03-01' }));
 });

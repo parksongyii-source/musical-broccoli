@@ -75,22 +75,21 @@ export function employmentPeriod(joinDate, asOf = seoulToday()) {
   return cycleAtYear(joinDate, year);
 }
 
-export function businessDays(startDate, endDate) {
+export function calendarDays(startDate, endDate) {
   const start = dateValue(startDate, '시작일');
   const end = dateValue(endDate, '종료일');
   if (end < start) fail('종료일은 시작일보다 빠를 수 없습니다.');
-  let count = 0;
-  for (const date = new Date(start); date <= end; date.setUTCDate(date.getUTCDate() + 1)) {
-    if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) count += 1;
-  }
-  return count;
+  return (end.getTime() - start.getTime()) / 86_400_000 + 1;
 }
 
+// Keep the previous export available to callers; the care-home policy counts
+// every selected work date, including Saturdays and Sundays.
+export const businessDays = calendarDays;
+
 function requestDays(start, end, type) {
-  const days = businessDays(start, end);
-  if (!days) fail('주말만 포함된 휴가는 신청할 수 없습니다.');
+  const days = calendarDays(start, end);
   if (type !== 'annual') {
-    if (start !== end) fail('반차는 평일 하루만 선택해 주세요.');
+    if (start !== end) fail('반차는 하루만 선택해 주세요.');
     return 0.5;
   }
   return days;
@@ -145,17 +144,20 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       reason TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','cancelled')),
       created_at TEXT NOT NULL,
-      review_note TEXT NOT NULL DEFAULT ''
+      review_note TEXT NOT NULL DEFAULT '',
+      day_policy TEXT NOT NULL DEFAULT 'calendar' CHECK(day_policy IN ('calendar','weekdays'))
     );
     CREATE INDEX IF NOT EXISTS requests_employee_date ON requests(employee_id, start_date, end_date);
   `);
-  // Preserve the original employee, allowance and request records when upgrading
-  // a 0.2 database. Stored adjustments remain available when manual mode is used.
+  // Snapshot before changing a previously saved database. Existing request
+  // amounts and weekday-only dates retain their original meaning on upgrade.
   let migrationBackupPath = null;
-  if (!db.prepare('PRAGMA table_info(employees)').all().some(column => column.name === 'allowance_mode')) {
+  const needsAllowanceMode = !db.prepare('PRAGMA table_info(employees)').all().some(column => column.name === 'allowance_mode');
+  const needsDayPolicy = !db.prepare('PRAGMA table_info(requests)').all().some(column => column.name === 'day_policy');
+  if (needsAllowanceMode || needsDayPolicy) {
     try {
       if (dbPath !== ':memory:') {
-        migrationBackupPath = `${resolve(dbPath)}.before-auto-${Date.now()}-${randomUUID()}.sqlite`;
+        migrationBackupPath = `${resolve(dbPath)}.before-${needsAllowanceMode ? 'auto' : 'weekend'}-${Date.now()}-${randomUUID()}.sqlite`;
         db.prepare('VACUUM INTO ?').run(migrationBackupPath);
         const snapshot = new DatabaseSync(migrationBackupPath, { readOnly: true });
         try {
@@ -165,7 +167,12 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
           }
         } finally { snapshot.close(); }
       }
-      db.exec("ALTER TABLE employees ADD COLUMN allowance_mode TEXT NOT NULL DEFAULT 'auto' CHECK(allowance_mode IN ('auto','manual'))");
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        if (needsAllowanceMode) db.exec("ALTER TABLE employees ADD COLUMN allowance_mode TEXT NOT NULL DEFAULT 'auto' CHECK(allowance_mode IN ('auto','manual'))");
+        if (needsDayPolicy) db.exec("ALTER TABLE requests ADD COLUMN day_policy TEXT NOT NULL DEFAULT 'weekdays' CHECK(day_policy IN ('calendar','weekdays'))");
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
     } catch (error) {
       db.close();
       throw new Error(`기존 자료를 안전하게 백업·업데이트하지 못했습니다: ${error.message}`);
@@ -225,6 +232,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       id: raw.id, employeeId: raw.employee_id, employeeName: employee.name, department: employee.department,
       startDate: raw.start_date, endDate: raw.end_date, type: raw.type, days: raw.days,
       reason: raw.reason, status: raw.status, createdAt: raw.created_at, reviewNote: raw.review_note,
+      includesWeekends: raw.day_policy !== 'weekdays',
     };
   }
   function findRequest(id) {
@@ -232,24 +240,77 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     if (!request) fail('휴가 신청을 찾을 수 없습니다.', 404);
     return request;
   }
-  function ensureBalance(id, period, days, excludeId = 0, requestDate = period.periodStart) {
+  function ensureBalance(id, period, days, excludeId = 0, requestDate = period.periodStart, candidate) {
     const { used, pending } = totals(id, period, excludeId);
     const employee = employeeExists(id);
     const completedYears = period.allowanceYear - Number(employee.join_date.slice(0, 4));
     // Annual grants are known for the requested anniversary cycle. A new hire's
     // monthly credits must already have accrued, rather than borrowing future months.
     const asOf = completedYears < 1 ? (requestDate < today() ? requestDate : today()) : period.periodStart;
-    if (used + pending + days > allowance(id, period, asOf)) fail('해당 입사일 기준 기간의 신청 가능한 잔여 연차가 부족합니다. 아직 발생하지 않은 월별 연차와 승인 대기 일수를 확인해 주세요.', 409);
+    const insufficient = () => fail('해당 입사일 기준 기간의 신청 가능한 잔여 연차가 부족합니다. 아직 발생하지 않은 월별 연차와 승인 대기 일수를 확인해 주세요.', 409);
+    const details = allowanceDetails(employee, period, asOf);
+    if (completedYears >= 1 || details.hasManualOverride || !candidate) {
+      if (used + pending + days > details.annualAllowance) insufficient();
+      return;
+    }
+    // Backdated entries must be checked in actual date order. A later October
+    // record must not consume August's allowance while adding an August entry.
+    // Future bookings still cannot borrow monthly credits not earned today.
+    const active = db.prepare(`SELECT * FROM requests WHERE employee_id = ? AND status IN ('pending','approved')
+      AND start_date >= ? AND start_date <= ? AND id != ?`).all(id, period.periodStart, period.periodEnd, excludeId);
+    const dates = new Map();
+    for (const raw of [...active, candidate]) {
+      const amount = raw.type === 'annual' ? 1 : 0.5;
+      for (const date of occupiedDates(raw)) dates.set(date, (dates.get(date) ?? 0) + amount);
+    }
+    const current = today();
+    let committed = 0;
+    for (const date of [...dates.keys()].sort()) {
+      committed += dates.get(date);
+      const earned = calculateEntitlement(employee.join_date, date < current ? date : current).automaticAllowance;
+      if (committed > earned) insufficient();
+    }
   }
-  function ensureNoOverlap(id, start, end, type, excludeId = 0) {
+  function occupiedDates(raw, start = raw.start_date, end = raw.end_date) {
+    const dates = [];
+    const first = dateValue(start, '시작일');
+    const last = dateValue(end, '종료일');
+    for (const value = new Date(first); value <= last; value.setUTCDate(value.getUTCDate() + 1)) {
+      if (raw.day_policy !== 'weekdays' || ![0, 6].includes(value.getUTCDay())) dates.push(value.toISOString().slice(0, 10));
+    }
+    return dates;
+  }
+  function ensureNoOverlap(id, start, end, type, excludeId = 0, includesWeekends = true) {
     const others = db.prepare(`SELECT * FROM requests WHERE employee_id = ? AND status IN ('pending','approved')
       AND start_date <= ? AND end_date >= ? AND id != ?`).all(id, end, start, excludeId);
     for (const other of others) {
       if (type !== 'annual' && other.type !== 'annual' && type !== other.type && start === other.start_date) continue;
       const overlapStart = start > other.start_date ? start : other.start_date;
       const overlapEnd = end < other.end_date ? end : other.end_date;
-      if (businessDays(overlapStart, overlapEnd) > 0) fail('같은 날짜에 승인되었거나 대기 중인 휴가가 있습니다.', 409);
+      const occupied = occupiedDates(other, overlapStart, overlapEnd);
+      if (occupied.some(value => includesWeekends || ![0, 6].includes(new Date(`${value}T00:00:00Z`).getUTCDay()))) fail('같은 날짜에 승인되었거나 대기 중인 휴가가 있습니다.', 409);
     }
+  }
+
+  function createRequest(body, { recordUsed = false } = {}) {
+    const id = positiveId(body.employeeId);
+    const employee = employeeExists(id);
+    if (!TYPES.has(body.type)) fail('연차 또는 오전·오후 반차를 선택해 주세요.');
+    const reason = text(body.reason, '사유', { required: false, max: 500 });
+    const startDate = body.startDate;
+    const endDate = recordUsed ? body.endDate ?? startDate : body.endDate;
+    const days = requestDays(startDate, endDate, body.type);
+    if (startDate < employee.join_date) fail('입사일 이전의 휴가는 신청할 수 없습니다.');
+    if (recordUsed && endDate > today()) fail('사용한 연차는 오늘까지의 날짜로 기록해 주세요.');
+    const period = employmentPeriod(employee.join_date, startDate);
+    if (endDate > period.periodEnd) fail('입사일 기준 연차 기간이 바뀌는 날짜를 걸쳐 신청할 수 없습니다. 기간별로 나누어 신청해 주세요.');
+    return transaction(() => {
+      ensureBalance(id, period, days, 0, startDate, { start_date: startDate, end_date: endDate, type: body.type, day_policy: 'calendar' });
+      ensureNoOverlap(id, startDate, endDate, body.type);
+      const result = db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at,review_note,day_policy)
+        VALUES(?,?,?,?,?,?,?,?,?,'calendar')`).run(id, startDate, endDate, body.type, days, reason, recordUsed ? 'approved' : 'pending', new Date().toISOString(), recordUsed ? '관리자 사용 기록' : '');
+      return requestView(findRequest(Number(result.lastInsertRowid)));
+    });
   }
 
   if (seed && db.prepare('SELECT COUNT(*) AS count FROM employees').get().count === 0) {
@@ -271,8 +332,8 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
         const result = insertEmployee.run(name, department, position, date);
         insertAllowance.run(Number(result.lastInsertRowid), employmentPeriod(date).allowanceYear, days);
       }
-      const insertRequest = db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at,review_note)
-        VALUES(?,?,?,?,?,?,?,?,?)`);
+      const insertRequest = db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at,review_note,day_policy)
+        VALUES(?,?,?,?,?,?,?,?,?,'calendar')`);
       const month = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Seoul', month: '2-digit' }).format(new Date());
       const weekday = (day) => {
         const value = new Date(Date.UTC(year, Number(month) - 1, day));
@@ -295,7 +356,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
         const period = employmentPeriod(joinDate, start);
         if (!period.active || end > period.periodEnd) continue;
         db.prepare('INSERT OR IGNORE INTO allowances(employee_id,year,days) VALUES(?,?,?)').run(id, period.allowanceYear, assigned);
-        const days = type === 'annual' ? businessDays(start, end) : 0.5;
+        const days = type === 'annual' ? calendarDays(start, end) : 0.5;
         if (days) insertRequest.run(id, start, end, type, days, reason, status, createdAt, '');
       }
     });
@@ -331,6 +392,43 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       return asOf >= period.joinDate && raw.start_date >= period.periodStart && raw.start_date <= period.periodEnd;
     }).map(requestView);
     res.json({ year, asOf, employees, requests });
+  });
+
+  app.get('/api/employees/:id/leave-history', (req, res) => {
+    const id = positiveId(req.params.id);
+    const employee = employeeExists(id);
+    const month = req.query.month ?? today().slice(0, 7);
+    if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) fail('조회 월은 YYYY-MM 형식으로 입력해 주세요.');
+    const first = dateValue(`${month}-01`, '조회 월');
+    const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+    const start = `${month}-01`;
+    const rawRecords = db.prepare(`SELECT * FROM requests WHERE employee_id = ? AND start_date <= ? AND end_date >= ?
+      ORDER BY start_date ASC, id ASC`).all(id, last, start);
+    const usedDates = [];
+    let usedDays = 0;
+    let pendingDays = 0;
+    const records = [];
+    for (const raw of rawRecords) {
+      const intersectionStart = raw.start_date > start ? raw.start_date : start;
+      const intersectionEnd = raw.end_date < last ? raw.end_date : last;
+      const dates = occupiedDates(raw, intersectionStart, intersectionEnd);
+      // A legacy weekday-only range may touch this month exclusively on a
+      // weekend; those dates were never leave and should not appear as history.
+      if (!dates.length) continue;
+      const dailyAmount = raw.type === 'annual' ? 1 : 0.5;
+      const monthDays = raw.type === 'annual' ? dates.length : 0.5;
+      records.push({ ...requestView(raw), monthDays });
+      if (raw.status === 'pending') pendingDays += monthDays;
+      if (raw.status === 'approved') {
+        usedDays += monthDays;
+        for (const date of dates) usedDates.push({ date, days: dailyAmount, requestId: raw.id, type: raw.type, reason: raw.reason });
+      }
+    }
+    usedDates.sort((left, right) => left.date.localeCompare(right.date) || left.requestId - right.requestId);
+    res.json({
+      employee: { id: employee.id, name: employee.name, department: employee.department, joinDate: employee.join_date },
+      month, records, usedDays, pendingDays, usedDates,
+    });
   });
 
   function importPreview(body) {
@@ -417,23 +515,11 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   });
 
   app.post('/api/requests', (req, res) => {
-    const body = req.body ?? {};
-    const id = positiveId(body.employeeId);
-    const employee = employeeExists(id);
-    if (!TYPES.has(body.type)) fail('연차 또는 오전·오후 반차를 선택해 주세요.');
-    const reason = text(body.reason, '사유', { required: false, max: 500 });
-    const days = requestDays(body.startDate, body.endDate, body.type);
-    if (body.startDate < employee.join_date) fail('입사일 이전의 휴가는 신청할 수 없습니다.');
-    const period = employmentPeriod(employee.join_date, body.startDate);
-    if (body.endDate > period.periodEnd) fail('입사일 기준 연차 기간이 바뀌는 날짜를 걸쳐 신청할 수 없습니다. 기간별로 나누어 신청해 주세요.');
-    const request = transaction(() => {
-      ensureBalance(id, period, days, 0, body.startDate);
-      ensureNoOverlap(id, body.startDate, body.endDate, body.type);
-      const result = db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at)
-        VALUES(?,?,?,?,?,?,'pending',?)`).run(id, body.startDate, body.endDate, body.type, days, reason, new Date().toISOString());
-      return requestView(findRequest(Number(result.lastInsertRowid)));
-    });
-    res.status(201).json(request);
+    res.status(201).json(createRequest(req.body ?? {}));
+  });
+
+  app.post('/api/requests/record-used', (req, res) => {
+    res.status(201).json(createRequest(req.body ?? {}, { recordUsed: true }));
   });
 
   app.patch('/api/requests/:id', (req, res) => {
@@ -450,8 +536,8 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
         const employee = employeeExists(previous.employee_id);
         const period = employmentPeriod(employee.join_date, previous.start_date);
         if (!period.active || previous.end_date > period.periodEnd) fail('이 휴가는 입사일 기준 기간을 벗어납니다. 취소 후 기간별로 다시 신청해 주세요.', 409);
-        ensureBalance(previous.employee_id, period, previous.days, id, previous.start_date);
-        ensureNoOverlap(previous.employee_id, previous.start_date, previous.end_date, previous.type, id);
+        ensureBalance(previous.employee_id, period, previous.days, id, previous.start_date, previous);
+        ensureNoOverlap(previous.employee_id, previous.start_date, previous.end_date, previous.type, id, previous.day_policy !== 'weekdays');
       }
       db.prepare('UPDATE requests SET status=?,review_note=? WHERE id=?').run(body.status, note, id);
       return requestView(findRequest(id));

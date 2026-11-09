@@ -1,0 +1,53 @@
+.monthly-history{display:grid;gap:22px;min-width:0}
+.monthly-history-controls{display:flex;align-items:flex-end;gap:18px;padding:22px;overflow:visible;position:relative;z-index:4;min-width:0}
+.monthly-history-controls>.employee-picker{flex:1;min-width:220px}
+.monthly-history-month{flex:0 0 auto;min-width:0}
+.monthly-history-month>label{display:block;font-size:12px;font-weight:650;color:#496458;margin-bottom:8px}
+.monthly-history-month-input{display:flex;align-items:center;border:1px solid #dce5df;background:#fff;border-radius:8px;padding:2px 4px;min-height:43px}
+.monthly-history-month-input input{width:147px;min-width:0;border:0;background:transparent;padding:6px;color:#2a4e3e;font-size:14px}
+.monthly-history-month-input .icon-button{width:31px;height:32px}
+.monthly-history-today{min-height:43px;white-space:nowrap}
+.monthly-history-empty,.monthly-history-loading{display:flex;align-items:center;justify-content:center;gap:17px;padding:58px 22px;color:#6b8175;text-align:center}
+.monthly-history-empty{flex-direction:column;min-height:260px}
+.monthly-history-empty>svg{color:#6f9880}
+.monthly-history-empty h2{font-size:19px;color:#315441}
+.monthly-history-empty p{font-size:13px;line-height:1.8}
+.monthly-history-empty small{font-size:12px}
+.monthly-history-heading{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:0 2px}
+.monthly-history-heading span{display:block;font-size:12px;color:#6d8777;margin-bottom:6px}
+.monthly-history-heading h2{font-size:21px;line-height:1.5;letter-spacing:-.5px;color:#274b3a}
+.monthly-history-heading>p{font-size:12px;color:#6e8276;white-space:nowrap}
+.monthly-history-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:17px}
+.monthly-history-stat{padding:21px 24px;min-width:0}
+.monthly-history-stat>span{display:flex;align-items:center;gap:8px;font-size:12px;color:#657f6e;font-weight:550}
+.monthly-history-stat>span svg{color:#799581}
+.monthly-history-stat strong{display:block;font-size:32px;line-height:1.4;color:#31573d;letter-spacing:-.8px;margin:13px 0 7px}
+.monthly-history-stat strong small{font-size:14px;letter-spacing:0;font-weight:500;margin-left:5px;color:#718575}
+.monthly-history-stat p{font-size:11px;line-height:1.7;color:#718473}
+.monthly-history-dates,.monthly-history-records{padding:23px;min-width:0}
+.monthly-history-section-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;min-width:0}
+.monthly-history-section-heading h3{font-size:15px;color:#31503d;line-height:1.7}
+.monthly-history-section-heading>span{font-size:11px;color:#718571}
+.monthly-history-section-heading p{font-size:12px;line-height:1.8;color:#748775;margin-top:3px}
+.monthly-history-date-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:11px}
+.monthly-history-date{position:relative;display:grid;grid-template-columns:1fr auto;gap:7px 10px;align-items:center;padding:14px;border-radius:9px;background:#f2f7ef;border:1px solid #e3ecdf;color:#3b5f43}
+.monthly-history-date>span{font-size:12px;font-weight:650}
+.monthly-history-date>strong{font-size:14px;font-weight:700;color:#31593c}
+.monthly-history-date>small{grid-column:1/-1;font-size:11px;color:#71856d}
+.monthly-history-no-dates{padding:20px 0;font-size:13px;color:#738572;text-align:center}
+.monthly-history-toggle{display:flex;align-items:center;gap:7px;font-size:12px;color:#647b67;white-space:nowrap;cursor:pointer}
+.monthly-history-toggle input{accent-color:#2f674b;width:15px;height:15px;flex-shrink:0}
+.monthly-history-table-wrap{width:100%;overflow:auto;max-height:520px;border:1px solid #e7ece3;border-radius:8px;overscroll-behavior:contain}
+.monthly-history-table{width:100%;min-width:650px;border-collapse:collapse;text-align:left;font-size:12px}
+.monthly-history-table th{position:sticky;top:0;padding:13px 14px;background:#f7f9f5;color:#6f826c;font-size:11px;font-weight:650;border-bottom:1px solid #e4eadd;white-space:nowrap}
+.monthly-history-table td{padding:16px 14px;line-height:1.7;color:#52694f;border-bottom:1px solid #edf0e7;vertical-align:top}
+.monthly-history-table td:first-child{min-width:180px}
+.monthly-history-table td:nth-child(2),.monthly-history-table td:nth-child(3),.monthly-history-table td:nth-child(4){white-space:nowrap}
+.monthly-history-table td:last-child{min-width:140px;max-width:300px;overflow-wrap:anywhere}
+.monthly-history-table td small{display:block;font-size:11px;line-height:1.7;color:#7a8c76;margin-top:4px}
+.monthly-history-table td strong{font-weight:600}
+.monthly-history-table tr:last-child td{border-bottom:0}
+.monthly-history-table tr.inactive{background:#fafbf8;opacity:.75}
+.monthly-history-no-records{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:13px;padding:38px 12px;color:#799071;font-size:13px}
+.monthly-history-footnote{font-size:11px;color:#7b8b74;line-height:1.8;margin-top:14px}
+@media(max-width:760px){.monthly-history{gap:17px}.monthly-history-controls{flex-wrap:wrap;gap:14px;padding:17px}.monthly-history-controls>.employee-picker{flex-basis:100%;min-width:0}.monthly-history-month{flex:1}.monthly-history-month-input{justify-content:space-between}.monthly-history-month-input input{width:145px;flex:1}.monthly-history-today{min-height:43px}.monthly-history-heading{align-items:flex-start;flex-direction:column;gap:5px}.monthly-history-heading h2{font-size:18px}.monthly-history-heading>p{font-size:11px}.monthly-history-stats{gap:9px}.monthly-history-stat{padding:15px 12px}.monthly-history-stat>span{font-size:11px;gap:5px}.monthly-history-stat>span svg{width:14px;height:14px}.monthly-history-stat strong{font-size:26px;margin:11px 0 6px}.monthly-history-stat strong small{font-size:12px;margin-left:3px}.monthly-history-stat p{font-size:11px}.monthly-history-dates,.monthly-history-records{padding:17px}.monthly-history-section-heading{align-items:flex-start;flex-direction:column;gap:8px;margin-bottom:14px}.monthly-history-section-heading h3{font-size:14px}.monthly-history-section-heading p{font-size:11px}.monthly-history-date-list{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:9px}.monthly-history-date{padding:12px}.monthly-history-table td{padding:14px 12px}.monthly-history-empty,.monthly-history-loading{padding:40px 18px}.monthly-history-loading{font-size:12px}.monthly-history-footnote{font-size:11px}}
