@@ -113,7 +113,7 @@ test('new hires cannot reserve monthly credits that have not accrued yet, while 
   const veteran = await employee({ joinDate: '2024-01-01' });
   const future = await leave(veteran.id, '2027-01-04');
   assert.equal(future.status, 201, JSON.stringify(future.body));
-  assert.equal((await request('PATCH', `/api/requests/${future.body.id}`, { status: 'approved' })).status, 200);
+  assert.equal(future.body.status, 'approved');
 });
 
 test('legacy SQLite migration creates a verified original snapshot and preserves staff, manual rows, and approved leave', async t => {

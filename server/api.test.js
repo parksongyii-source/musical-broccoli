@@ -64,20 +64,22 @@ test('fresh databases contain no employees or requests when demo seeding is disa
   assert.deepEqual(data.requests, []);
 });
 
-test('annual leave counts all selected calendar days, reserves balance, and approval moves reserved days to used days', async t => {
-  const { employee, apply, request, bootstrap } = await fixture(t);
+test('demo data uses immediately registered leave and never creates approval work', () => {
+  const app = createApp({ dbPath: ':memory:', seed: true });
+  try {
+    assert.ok(app.locals.db.prepare('SELECT COUNT(*) AS count FROM requests').get().count > 0);
+    assert.equal(app.locals.db.prepare("SELECT COUNT(*) AS count FROM requests WHERE status != 'approved'").get().count, 0);
+  } finally { app.locals.close(); }
+});
+
+test('annual leave immediately registers and deducts every selected calendar day without approval', async t => {
+  const { employee, apply, bootstrap } = await fixture(t);
   const staff = await employee();
   const leave = await apply(staff.id, { startDate: '2026-11-06', endDate: '2026-11-09' });
   assert.equal(leave.status, 201, JSON.stringify(leave.body));
   assert.equal(leave.body.days, 4);
-  assert.equal(leave.body.status, 'pending');
-  let snapshot = await bootstrap();
-  assert.equal(snapshot.employees[0].pendingDays, 4);
-  assert.equal(snapshot.employees[0].usedDays, 0);
-  assert.equal(snapshot.employees[0].remainingDays, 15);
-  const approval = await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'approved' });
-  assert.equal(approval.status, 200, JSON.stringify(approval.body));
-  snapshot = await bootstrap();
+  assert.equal(leave.body.status, 'approved');
+  const snapshot = await bootstrap();
   assert.equal(snapshot.employees[0].pendingDays, 0);
   assert.equal(snapshot.employees[0].usedDays, 4);
   assert.equal(snapshot.employees[0].remainingDays, 11);
@@ -94,20 +96,21 @@ test('opposite half-days can share a weekday but duplicate halves and full-day o
   assert.equal(afternoon.status, 201, JSON.stringify(afternoon.body));
   assert.equal(afternoon.body.days, 0.5);
   assertClientError(await apply(staff.id));
-  assert.equal((await bootstrap()).employees[0].pendingDays, 1);
+  assert.equal((await bootstrap()).employees[0].usedDays, 1);
+  assert.equal((await bootstrap()).employees[0].pendingDays, 0);
 });
 
-test('pending requests reserve allowance and rejection releases it', async t => {
+test('registered leave consumes allowance and cancellation releases it for a replacement', async t => {
   const { employee, apply, request, bootstrap } = await fixture(t);
   const staff = await employee(1);
   const first = await apply(staff.id);
   assert.equal(first.status, 201, JSON.stringify(first.body));
   assertClientError(await apply(staff.id, { startDate: '2026-11-03', endDate: '2026-11-03' }));
-  const rejected = await request('PATCH', `/api/requests/${first.body.id}`, {
-    status: 'rejected', reviewNote: '일정 재조정 필요',
+  const cancelled = await request('PATCH', `/api/requests/${first.body.id}`, {
+    status: 'cancelled', reviewNote: '일정 재조정 필요',
   });
-  assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
-  assert.equal(rejected.body.reviewNote, '일정 재조정 필요');
+  assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
+  assert.equal(cancelled.body.reviewNote, '일정 재조정 필요');
   assert.equal((await bootstrap()).employees[0].pendingDays, 0);
   const replacement = await apply(staff.id);
   assert.equal(replacement.status, 201, JSON.stringify(replacement.body));
@@ -118,7 +121,7 @@ test('cancelling approved leave restores the balance and blocks unsupported stat
   const staff = await employee(2);
   const leave = await apply(staff.id);
   assert.equal(leave.status, 201, JSON.stringify(leave.body));
-  assert.equal((await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'approved' })).status, 200);
+  assertClientError(await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'approved' }));
   assertClientError(await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'rejected' }));
   const cancelled = await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'cancelled' });
   assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
@@ -140,7 +143,7 @@ test('invalid calendar dates, reversed ranges, cross-period requests, and multip
   assert.deepEqual((await bootstrap()).requests, []);
 });
 
-test('allowance cannot be lowered below already approved and pending leave', async t => {
+test('allowance cannot be lowered below already registered leave', async t => {
   const { employee, apply, request, bootstrap } = await fixture(t);
   const staff = await employee(3);
   const leave = await apply(staff.id, { startDate: '2026-11-02', endDate: '2026-11-03' });
@@ -236,7 +239,7 @@ test('employee, allowance, and approved leave survive closing and reopening the 
       type: 'half_am', reason: '저장 검증',
     });
     assert.equal(leave.status, 201, JSON.stringify(leave.body));
-    assert.equal((await request('PATCH', `/api/requests/${leave.body.id}`, { status: 'approved' })).status, 200);
+    assert.equal(leave.body.status, 'approved');
     await stop();
     request = await start();
     const restored = await request('GET', '/api/bootstrap?asOf=2026-11-05');
@@ -290,7 +293,8 @@ test('leave may cross December to January inside an employment period but cannot
   assert.equal(data.employees[0].periodStart, '2026-03-01');
   assert.equal(data.employees[0].periodEnd, '2027-02-28');
   assert.equal(data.employees[0].allowanceYear, 2026);
-  assert.equal(data.employees[0].pendingDays, 5);
+  assert.equal(data.employees[0].usedDays, 5);
+  assert.equal(data.employees[0].pendingDays, 0);
   assert.equal(data.requests[0].id, spanningNewYear.body.id);
   assertClientError(await apply(staff.id, { startDate: '2027-02-26', endDate: '2027-03-01' }));
 });
@@ -302,7 +306,7 @@ test('the anniversary selects new allowance and excludes the previous employment
   assert.equal(allowanceUpdate.status, 200, JSON.stringify(allowanceUpdate.body));
   const previousLeave = await apply(staff.id, { startDate: '2026-02-27', endDate: '2026-02-27' });
   assert.equal(previousLeave.status, 201, JSON.stringify(previousLeave.body));
-  assert.equal((await request('PATCH', `/api/requests/${previousLeave.body.id}`, { status: 'approved' })).status, 200);
+  assert.equal(previousLeave.body.status, 'approved');
   const previous = await bootstrap('2026-02-28');
   assert.equal(previous.employees[0].annualAllowance, 10);
   assert.equal(previous.employees[0].usedDays, 1);
@@ -316,7 +320,7 @@ test('the anniversary selects new allowance and excludes the previous employment
   assert.equal(reset.requests.length, 0);
   const newLeave = await apply(staff.id, { startDate: '2026-03-02', endDate: '2026-03-02' });
   assert.equal(newLeave.status, 201, JSON.stringify(newLeave.body));
-  assert.equal((await request('PATCH', `/api/requests/${newLeave.body.id}`, { status: 'approved' })).status, 200);
+  assert.equal(newLeave.body.status, 'approved');
   const current = await bootstrap('2026-03-01');
   assert.equal(current.employees[0].usedDays, 1);
   assert.equal(current.employees[0].remainingDays, 19);

@@ -39,9 +39,10 @@ type Props = {
 };
 
 const typeLabels: Record<LeaveType, string> = { annual: '연차', half_am: '오전 반차', half_pm: '오후 반차' };
-const statusLabels: Record<Status, string> = { approved: '사용 기록', pending: '승인 대기', cancelled: '취소', rejected: '반려' };
+const statusLabels: Record<Status, string> = { approved: '사용', pending: '이전 기록', cancelled: '취소', rejected: '과거 반려' };
 const dayCount = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
-const seoulMonth = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul' }).format(new Date()).slice(0, 7);
+const seoulToday = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul' }).format(new Date());
+const seoulMonth = () => seoulToday().slice(0, 7);
 
 function shiftMonth(month: string, offset: number) {
   const [year, value] = month.split('-').map(Number);
@@ -119,6 +120,9 @@ export default function MonthlyHistory({ employees, employeeId, onEmployeeChange
   const records = [...(history?.records ?? [])].filter(record => includeOther || record.status === 'approved')
     .sort((left, right) => left.startDate.localeCompare(right.startDate) || left.id - right.id);
   const [year, monthNumber] = month.split('-').map(Number);
+  const today = seoulToday();
+  const futureDays = dates.filter(entry => entry.date > today).reduce((sum, entry) => sum + entry.days, 0);
+  const recordStatus = (record: HistoryRecord) => record.status === 'approved' ? record.startDate > today ? '예정' : record.endDate > today ? '사용·예정' : '사용' : statusLabels[record.status];
 
   return <div className="monthly-history">
     <section className="panel monthly-history-controls" aria-label="직원별 월별 조회 조건">
@@ -140,12 +144,12 @@ export default function MonthlyHistory({ employees, employeeId, onEmployeeChange
           : history && <>
             <div className="monthly-history-heading"><div><span>{history.employee.department || selectedEmployee?.department || '부서 미지정'}</span><h2>{history.employee.name} 님의 {year}년 {monthNumber}월 사용 내역</h2></div><p>입사일 {history.employee.joinDate.replaceAll('-', '.')}</p></div>
             <div className="monthly-history-stats" aria-label="월별 연차 요약">
-              <section className="panel monthly-history-stat"><span><CalendarDays size={17} />이번 달 사용</span><strong>{dayCount(history.usedDays)}<small>일</small></strong><p>승인된 사용 기록 기준</p></section>
-              <section className="panel monthly-history-stat"><span><Coffee size={17} />사용한 날짜</span><strong>{dates.length}<small>일</small></strong><p>같은 날의 반차는 한 날짜로 표시</p></section>
-              <section className="panel monthly-history-stat"><span><Clock3 size={17} />승인 대기</span><strong>{dayCount(history.pendingDays)}<small>일</small></strong><p>사용 합계에는 포함되지 않습니다.</p></section>
+              <section className="panel monthly-history-stat"><span><CalendarDays size={17} />이번 달 사용·예정</span><strong>{dayCount(history.usedDays)}<small>일</small></strong><p>저장한 휴가를 바로 차감한 일수</p></section>
+              <section className="panel monthly-history-stat"><span><Coffee size={17} />등록한 날짜</span><strong>{dates.length}<small>일</small></strong><p>같은 날의 반차는 한 날짜로 표시</p></section>
+              <section className="panel monthly-history-stat"><span><Clock3 size={17} />이 달 예정 휴가</span><strong>{dayCount(futureDays)}<small>일</small></strong><p>위 사용·예정 합계에 포함됩니다.</p></section>
             </div>
-            <section className="panel monthly-history-dates"><div className="monthly-history-section-heading"><h3>사용한 날짜 한눈에 보기</h3><span>주말·공휴일에도 사용 가능</span></div>{dates.length ? <div className="monthly-history-date-list">{dates.map(entry => <div className="monthly-history-date" key={entry.date} title={[...entry.reasons].join(' · ')}><span>{dateLabel(entry.date)}</span><strong>{dayCount(entry.days)}일</strong><small>{[...entry.types].map(type => typeLabels[type]).join(' · ')}</small></div>)}</div> : <p className="monthly-history-no-dates">이 달에 승인된 사용 기록이 없습니다.</p>}</section>
-            <section className="panel monthly-history-records"><div className="monthly-history-section-heading"><div><h3>상세 사용 내역</h3><p>여러 달에 걸친 연차는 조회 월에 해당하는 일수만 표시합니다.</p></div><label className="monthly-history-toggle"><input type="checkbox" checked={includeOther} onChange={event => setIncludeOther(event.target.checked)} />취소·대기 기록도 보기</label></div><div className="monthly-history-table-wrap"><table className="monthly-history-table"><thead><tr><th>이 달 사용 날짜</th><th>유형</th><th>이 달 일수</th><th>상태</th><th>사유·메모</th></tr></thead><tbody>{records.map(record => <tr key={record.id} className={record.status === 'cancelled' || record.status === 'rejected' ? 'inactive' : ''}><td><strong>{visibleRange(record, month, history.usedDates)}</strong>{(record.startDate < `${month}-01` || record.endDate.slice(0, 7) !== month) && <small>전체 기간 {record.startDate} ~ {record.endDate}</small>}</td><td>{typeLabels[record.type]}</td><td><strong>{dayCount(record.monthDays)}일</strong></td><td><span className={`status-badge ${record.status}`}><span />{statusLabels[record.status]}</span></td><td><span>{record.reason || '—'}</span>{record.reviewNote && <small>{record.reviewNote}</small>}</td></tr>)}</tbody></table></div>{!records.length && <div className="monthly-history-no-records"><Coffee size={25} strokeWidth={1.5} /><p>{includeOther ? '이 달에 등록된 기록이 없습니다.' : '이 달에 승인된 사용 기록이 없습니다.'}</p></div>}<p className="monthly-history-footnote">취소·반려·승인 대기 기록은 이번 달 사용 합계에 포함하지 않습니다.</p></section>
+            <section className="panel monthly-history-dates"><div className="monthly-history-section-heading"><h3>사용한 날짜 한눈에 보기</h3><span>주말·공휴일에도 사용 가능</span></div>{dates.length ? <div className="monthly-history-date-list">{dates.map(entry => <div className="monthly-history-date" key={entry.date} title={[...entry.reasons].join(' · ')}><span>{dateLabel(entry.date)}{entry.date > today && <em className="monthly-scheduled-label">예정</em>}</span><strong>{dayCount(entry.days)}일</strong><small>{[...entry.types].map(type => typeLabels[type]).join(' · ')}</small></div>)}</div> : <p className="monthly-history-no-dates">이 달에 등록된 사용·예정 휴가가 없습니다.</p>}</section>
+            <section className="panel monthly-history-records"><div className="monthly-history-section-heading"><div><h3>상세 사용 내역</h3><p>여러 달에 걸친 연차는 조회 월에 해당하는 일수만 표시합니다.</p></div><label className="monthly-history-toggle"><input type="checkbox" checked={includeOther} onChange={event => setIncludeOther(event.target.checked)} />취소된 이전 기록도 보기</label></div><div className="monthly-history-table-wrap"><table className="monthly-history-table"><thead><tr><th>이 달 사용 날짜</th><th>유형</th><th>이 달 일수</th><th>상태</th><th>사유·메모</th></tr></thead><tbody>{records.map(record => <tr key={record.id} className={record.status === 'cancelled' || record.status === 'rejected' ? 'inactive' : ''}><td><strong>{visibleRange(record, month, history.usedDates)}</strong>{(record.startDate < `${month}-01` || record.endDate.slice(0, 7) !== month) && <small>전체 기간 {record.startDate} ~ {record.endDate}</small>}</td><td>{typeLabels[record.type]}</td><td><strong>{dayCount(record.monthDays)}일</strong></td><td><span className={`status-badge ${record.status}`}><span />{recordStatus(record)}</span></td><td><span>{record.reason || '—'}</span>{record.reviewNote && <small>{record.reviewNote}</small>}</td></tr>)}</tbody></table></div>{!records.length && <div className="monthly-history-no-records"><Coffee size={25} strokeWidth={1.5} /><p>{includeOther ? '이 달에 등록된 기록이 없습니다.' : '이 달에 등록된 사용·예정 휴가가 없습니다.'}</p></div>}<p className="monthly-history-footnote">예정 휴가도 저장 즉시 차감됩니다. 취소된 이전 기록은 이 달 사용·예정 합계에 포함하지 않습니다.</p></section>
           </>}
   </div>;
 }

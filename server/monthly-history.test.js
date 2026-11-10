@@ -42,11 +42,12 @@ async function fixture(t, { dbPath = ':memory:', now = '2026-11-10' } = {}) {
     assert.equal(result.status, 201, JSON.stringify(result.body));
     return result.body;
   }
-  async function pending(employeeId, startDate, overrides = {}) {
+  async function register(employeeId, startDate, overrides = {}) {
     const result = await request('POST', '/api/requests', {
       employeeId, startDate, endDate: startDate, type: 'annual', ...overrides,
     });
     assert.equal(result.status, 201, JSON.stringify(result.body));
+    assert.equal(result.body.status, 'approved');
     return result.body;
   }
   async function history(employeeId, month) {
@@ -54,7 +55,7 @@ async function fixture(t, { dbPath = ':memory:', now = '2026-11-10' } = {}) {
     assert.equal(result.status, 200, JSON.stringify(result.body));
     return result.body;
   }
-  return { app, request, employee, record, pending, history };
+  return { app, request, employee, record, register, history };
 }
 
 test('monthly history splits a cross-month calendar range into the dates used in each month', async t => {
@@ -97,22 +98,22 @@ test('Sunday half-days and a Korean public holiday are visible and included in m
   ]);
 });
 
-test('only approved dates contribute to used totals while pending, rejected and cancelled records retain their status', async t => {
-  const { employee, record, pending, history, request } = await fixture(t);
+test('registered dates contribute immediately while historical rejected and cancelled rows remain audit-only', async t => {
+  const { app, employee, record, register, history, request } = await fixture(t);
   const staff = await employee();
   await record(staff.id, '2026-11-01');
   await record(staff.id, '2026-11-03', { type: 'half_am' });
-  await pending(staff.id, '2026-11-04');
-  const rejected = await pending(staff.id, '2026-11-05');
-  assert.equal((await request('PATCH', `/api/requests/${rejected.id}`, { status: 'rejected' })).status, 200);
+  await register(staff.id, '2026-11-04');
+  app.locals.db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at,review_note,day_policy)
+    VALUES(?,'2026-11-05','2026-11-05','annual',1,'과거 반려 내역','rejected','2026-11-01T00:00:00Z','','calendar')`).run(staff.id);
   const cancelled = await record(staff.id, '2026-11-06');
   assert.equal((await request('PATCH', `/api/requests/${cancelled.id}`, { status: 'cancelled' })).status, 200);
   const month = await history(staff.id, '2026-11');
-  assert.equal(month.usedDays, 1.5);
-  assert.equal(month.pendingDays, 1);
+  assert.equal(month.usedDays, 2.5);
+  assert.equal(month.pendingDays, 0);
   assert.equal(month.records.length, 5);
-  assert.deepEqual(month.records.map(row => row.status), ['approved', 'approved', 'pending', 'rejected', 'cancelled']);
-  assert.deepEqual(month.usedDates.map(row => [row.date, row.days]), [['2026-11-01', 1], ['2026-11-03', 0.5]]);
+  assert.deepEqual(month.records.map(row => row.status), ['approved', 'approved', 'approved', 'rejected', 'cancelled']);
+  assert.deepEqual(month.usedDates.map(row => [row.date, row.days]), [['2026-11-01', 1], ['2026-11-03', 0.5], ['2026-11-04', 1]]);
 });
 
 test('monthly history is employee-specific and is not limited to the current anniversary period', async t => {

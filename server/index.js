@@ -142,22 +142,25 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       type TEXT NOT NULL CHECK(type IN ('annual','half_am','half_pm')),
       days REAL NOT NULL CHECK(days > 0),
       reason TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','cancelled')),
+      status TEXT NOT NULL DEFAULT 'approved' CHECK(status IN ('pending','approved','rejected','cancelled')),
       created_at TEXT NOT NULL,
       review_note TEXT NOT NULL DEFAULT '',
       day_policy TEXT NOT NULL DEFAULT 'calendar' CHECK(day_policy IN ('calendar','weekdays'))
     );
     CREATE INDEX IF NOT EXISTS requests_employee_date ON requests(employee_id, start_date, end_date);
   `);
-  // Snapshot before changing a previously saved database. Existing request
-  // amounts and weekday-only dates retain their original meaning on upgrade.
+  // Verify a snapshot before schema changes or the administrator-only upgrade.
+  // Converting pending registrations changes only their status, preserving
+  // their committed days, original weekday policy, IDs, and audit notes.
   let migrationBackupPath = null;
   const needsAllowanceMode = !db.prepare('PRAGMA table_info(employees)').all().some(column => column.name === 'allowance_mode');
   const needsDayPolicy = !db.prepare('PRAGMA table_info(requests)').all().some(column => column.name === 'day_policy');
-  if (needsAllowanceMode || needsDayPolicy) {
+  const needsAdminRegistration = db.prepare("SELECT COUNT(*) AS count FROM requests WHERE status = 'pending'").get().count > 0;
+  if (needsAllowanceMode || needsDayPolicy || needsAdminRegistration) {
     try {
       if (dbPath !== ':memory:') {
-        migrationBackupPath = `${resolve(dbPath)}.before-${needsAllowanceMode ? 'auto' : 'weekend'}-${Date.now()}-${randomUUID()}.sqlite`;
+        const reason = needsAllowanceMode ? 'auto' : needsDayPolicy ? 'weekend' : 'admin';
+        migrationBackupPath = `${resolve(dbPath)}.before-${reason}-${Date.now()}-${randomUUID()}.sqlite`;
         db.prepare('VACUUM INTO ?').run(migrationBackupPath);
         const snapshot = new DatabaseSync(migrationBackupPath, { readOnly: true });
         try {
@@ -171,6 +174,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       try {
         if (needsAllowanceMode) db.exec("ALTER TABLE employees ADD COLUMN allowance_mode TEXT NOT NULL DEFAULT 'auto' CHECK(allowance_mode IN ('auto','manual'))");
         if (needsDayPolicy) db.exec("ALTER TABLE requests ADD COLUMN day_policy TEXT NOT NULL DEFAULT 'weekdays' CHECK(day_policy IN ('calendar','weekdays'))");
+        if (needsAdminRegistration) db.exec("UPDATE requests SET status = 'approved' WHERE status = 'pending'");
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     } catch (error) {
@@ -247,7 +251,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     // Annual grants are known for the requested anniversary cycle. A new hire's
     // monthly credits must already have accrued, rather than borrowing future months.
     const asOf = completedYears < 1 ? (requestDate < today() ? requestDate : today()) : period.periodStart;
-    const insufficient = () => fail('해당 입사일 기준 기간의 신청 가능한 잔여 연차가 부족합니다. 아직 발생하지 않은 월별 연차와 승인 대기 일수를 확인해 주세요.', 409);
+    const insufficient = () => fail('해당 입사일 기준 기간의 잔여 연차가 부족합니다. 아직 발생하지 않은 월별 연차와 이미 등록한 일수를 확인해 주세요.', 409);
     const details = allowanceDetails(employee, period, asOf);
     if (completedYears >= 1 || details.hasManualOverride || !candidate) {
       if (used + pending + days > details.annualAllowance) insufficient();
@@ -288,7 +292,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       const overlapStart = start > other.start_date ? start : other.start_date;
       const overlapEnd = end < other.end_date ? end : other.end_date;
       const occupied = occupiedDates(other, overlapStart, overlapEnd);
-      if (occupied.some(value => includesWeekends || ![0, 6].includes(new Date(`${value}T00:00:00Z`).getUTCDay()))) fail('같은 날짜에 승인되었거나 대기 중인 휴가가 있습니다.', 409);
+      if (occupied.some(value => includesWeekends || ![0, 6].includes(new Date(`${value}T00:00:00Z`).getUTCDay()))) fail('같은 날짜에 이미 등록한 휴가가 있습니다.', 409);
     }
   }
 
@@ -308,7 +312,7 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       ensureBalance(id, period, days, 0, startDate, { start_date: startDate, end_date: endDate, type: body.type, day_policy: 'calendar' });
       ensureNoOverlap(id, startDate, endDate, body.type);
       const result = db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at,review_note,day_policy)
-        VALUES(?,?,?,?,?,?,?,?,?,'calendar')`).run(id, startDate, endDate, body.type, days, reason, recordUsed ? 'approved' : 'pending', new Date().toISOString(), recordUsed ? '관리자 사용 기록' : '');
+        VALUES(?,?,?,?,?,?,?,?,?,'calendar')`).run(id, startDate, endDate, body.type, days, reason, 'approved', new Date().toISOString(), recordUsed ? '관리자 사용 기록' : '');
       return requestView(findRequest(Number(result.lastInsertRowid)));
     });
   }
@@ -344,12 +348,12 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       const sample = [
         [1, `${year}-03-09`, `${year}-03-10`, 'annual', '개인 일정', 'approved'],
         [2, weekday(3), weekday(3), 'annual', '가족 행사', 'approved'],
-        [3, weekday(12), weekday(13), 'annual', '재충전 휴가', 'pending'],
-        [4, weekday(18), weekday(18), 'half_pm', '개인 용무', 'pending'],
-        [5, weekday(23), weekday(24), 'annual', '가족 여행', 'pending'],
+        [3, weekday(12), weekday(13), 'annual', '재충전 휴가', 'approved'],
+        [4, weekday(18), weekday(18), 'half_pm', '개인 용무', 'approved'],
+        [5, weekday(23), weekday(24), 'annual', '가족 여행', 'approved'],
         [6, `${year}-07-06`, `${year}-07-08`, 'annual', '여름 휴가', 'approved'],
         [7, weekday(9), weekday(9), 'half_am', '개인 일정', 'approved'],
-        [8, weekday(26), weekday(26), 'annual', '개인 일정', 'pending'],
+        [8, weekday(26), weekday(26), 'annual', '개인 일정', 'approved'],
       ];
       for (const [id, start, end, type, reason, status] of sample) {
         const [, , , joinDate, assigned] = staff[id - 1];
@@ -397,6 +401,8 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
   app.get('/api/leave-reports', (req, res) => {
     const asOf = req.query.asOf ?? today();
     dateValue(asOf, '조회 기준일');
+    const actualToday = today();
+    const todayDate = dateValue(actualToday, '오늘 날짜');
     const month = req.query.month ?? asOf.slice(0, 7);
     if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) fail('조회 월은 YYYY-MM 형식으로 입력해 주세요.');
     const first = dateValue(`${month}-01`, '조회 월');
@@ -422,10 +428,19 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     const collator = new Intl.Collator('ko', { sensitivity: 'base', numeric: true });
     const employees = db.prepare('SELECT * FROM employees').all().map(raw => {
       const employee = employeeView(raw, asOf);
+      const current = employeeView(raw, actualToday);
+      const currentPeriod = employmentPeriod(raw.join_date, actualToday);
+      const daysUntilExpiry = (dateValue(employee.periodEnd, '사용 기한').getTime() - todayDate.getTime()) / 86_400_000;
       return {
         ...employee,
         department: employee.department.trim().normalize('NFC') || '미지정',
         usageRate: usageRate(employee.usedDays, employee.annualAllowance),
+        expiryDate: employee.periodEnd,
+        daysUntilExpiry,
+        currentRemainingDays: current.remainingDays,
+        isUrgent: currentPeriod.active && employee.periodStart === current.periodStart
+          && employee.periodEnd === current.periodEnd && current.remainingDays > 0
+          && employee.remainingDays > 0 && daysUntilExpiry >= 0 && daysUntilExpiry <= 60,
         ...(monthly.get(employee.id) ?? { monthUsedDays: 0, monthPendingDays: 0 }),
       };
     }).sort((left, right) => collator.compare(left.name, right.name)
@@ -451,7 +466,83 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     summary.usageRate = usageRate(summary.usedDays, summary.annualAllowance);
     const teams = [...byDepartment.values()].map(team => ({ ...team, usageRate: usageRate(team.usedDays, team.annualAllowance) }))
       .sort((left, right) => collator.compare(left.department, right.department));
-    res.json({ asOf, month, summary, teams, employees });
+    res.json({ asOf, month, today: actualToday, urgentWindowDays: 60, summary, teams, employees });
+  });
+
+  app.get('/api/leave-ledger', (req, res) => {
+    const asOf = req.query.asOf ?? today();
+    dateValue(asOf, '조회 기준일');
+    const month = req.query.month ?? asOf.slice(0, 7);
+    if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) fail('조회 월은 YYYY-MM 형식으로 입력해 주세요.');
+    const first = dateValue(`${month}-01`, '조회 월');
+    const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+    const days = occupiedDates({ day_policy: 'calendar' }, `${month}-01`, last);
+    const byEmployee = new Map();
+    const actualToday = today();
+    const rawRecords = db.prepare(`SELECT * FROM requests WHERE status = 'approved' AND start_date <= ? AND end_date >= ?
+      ORDER BY start_date ASC, id ASC`).all(last, `${month}-01`);
+    for (const raw of rawRecords) {
+      if (!byEmployee.has(raw.employee_id)) byEmployee.set(raw.employee_id, new Map());
+      const cells = byEmployee.get(raw.employee_id);
+      const start = raw.start_date > `${month}-01` ? raw.start_date : `${month}-01`;
+      const end = raw.end_date < last ? raw.end_date : last;
+      const amount = raw.type === 'annual' ? 1 : 0.5;
+      for (const date of occupiedDates(raw, start, end)) {
+        if (!cells.has(date)) cells.set(date, []);
+        cells.get(date).push({ id: raw.id, type: raw.type, days: amount, reason: raw.reason, isFuture: date > actualToday });
+      }
+    }
+    const collator = new Intl.Collator('ko', { sensitivity: 'base', numeric: true });
+    const employees = db.prepare('SELECT * FROM employees').all().map(raw => {
+      const cells = days.map(date => {
+        const records = byEmployee.get(raw.id)?.get(date) ?? [];
+        return { date, days: records.reduce((sum, record) => sum + record.days, 0), types: [...new Set(records.map(record => record.type))], records };
+      });
+      return { ...employeeView(raw, asOf), monthUsedDays: cells.reduce((sum, cell) => sum + cell.days, 0), cells };
+    }).sort((left, right) => collator.compare(left.name, right.name) || collator.compare(left.department, right.department) || left.id - right.id);
+    res.json({ month, asOf, days, employees, summary: {
+      employeeCount: employees.length,
+      monthUsedDays: employees.reduce((sum, employee) => sum + employee.monthUsedDays, 0),
+      usedEmployeeCount: employees.filter(employee => employee.monthUsedDays > 0).length,
+    } });
+  });
+
+  app.get('/api/employees/:id/leave-period', (req, res) => {
+    const id = positiveId(req.params.id);
+    const rawEmployee = employeeExists(id);
+    const asOf = req.query.asOf ?? today();
+    dateValue(asOf, '조회 기준일');
+    const employee = employeeView(rawEmployee, asOf);
+    const period = employmentPeriod(rawEmployee.join_date, asOf);
+    const rawRecords = period.active ? db.prepare(`SELECT * FROM requests WHERE employee_id = ? AND start_date >= ? AND start_date <= ?
+      ORDER BY start_date ASC, id ASC`).all(id, period.periodStart, period.periodEnd) : [];
+    const records = [];
+    const usedDates = [];
+    for (const raw of rawRecords) {
+      const end = raw.end_date < period.periodEnd ? raw.end_date : period.periodEnd;
+      const dates = occupiedDates(raw, raw.start_date, end);
+      const amount = raw.type === 'annual' ? 1 : 0.5;
+      records.push({ ...requestView(raw), periodDays: dates.length * amount });
+      if (raw.status === 'approved') {
+        for (const date of dates) usedDates.push({ date, days: amount, requestId: raw.id, type: raw.type, reason: raw.reason });
+      }
+    }
+    usedDates.sort((left, right) => left.date.localeCompare(right.date) || left.requestId - right.requestId);
+    const months = [];
+    const monthDate = dateValue(`${period.periodStart.slice(0, 7)}-01`, '조회 월');
+    const finalMonth = period.periodEnd.slice(0, 7);
+    while (monthDate.toISOString().slice(0, 7) <= finalMonth) {
+      const month = monthDate.toISOString().slice(0, 7);
+      const dates = usedDates.filter(entry => entry.date.startsWith(month));
+      months.push({ month, usedDays: dates.reduce((sum, entry) => sum + entry.days, 0), usedDates: dates });
+      monthDate.setUTCMonth(monthDate.getUTCMonth() + 1);
+    }
+    res.json({
+      employee: { id, name: rawEmployee.name, department: rawEmployee.department, joinDate: rawEmployee.join_date },
+      asOf, periodStart: period.periodStart, periodEnd: period.periodEnd,
+      annualAllowance: employee.annualAllowance, usedDays: employee.usedDays, pendingDays: employee.pendingDays,
+      remainingDays: employee.remainingDays, records, usedDates, months,
+    });
   });
 
   app.get('/api/employees/:id/leave-history', (req, res) => {
@@ -563,9 +654,9 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
       const transitioningToManual = mode === 'manual' && previous.allowance_mode !== 'manual';
       const retained = db.prepare('SELECT days FROM allowances WHERE employee_id = ? AND year = ?').get(id, year)?.days;
       const candidate = assigned ?? (transitioningToManual ? retained ?? calculateEntitlement(joinDate, asOf).automaticAllowance : null);
-      if (candidate !== null && candidate < used + pending) fail('부여 연차는 사용한 연차와 승인 대기 일수의 합계보다 작을 수 없습니다.', 409);
+      if (candidate !== null && candidate < used + pending) fail('부여 연차는 이미 등록한 연차 일수보다 작을 수 없습니다.', 409);
       const earliest = db.prepare("SELECT MIN(start_date) AS firstDate FROM requests WHERE employee_id = ? AND status IN ('pending','approved')").get(id).firstDate;
-      if (earliest && joinDate !== previous.join_date) fail('승인 또는 대기 중인 휴가가 있는 직원의 입사일은 변경할 수 없습니다. 기존 휴가를 먼저 정리해 주세요.', 409);
+      if (earliest && joinDate !== previous.join_date) fail('등록된 휴가가 있는 직원의 입사일은 변경할 수 없습니다. 기존 휴가를 먼저 정리해 주세요.', 409);
       db.prepare('UPDATE employees SET name=?,department=?,position=?,join_date=?,allowance_mode=? WHERE id=?').run(name, department, position, joinDate, mode, id);
       if (assigned !== null) db.prepare(`INSERT INTO allowances(employee_id,year,days) VALUES(?,?,?)
         ON CONFLICT(employee_id,year) DO UPDATE SET days=excluded.days`).run(id, year, assigned);
@@ -589,8 +680,10 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     const note = text(body.reviewNote, '검토 메모', { required: false, max: 500 });
     const request = transaction(() => {
       const previous = findRequest(id);
+      // Retain the old transition contract for legacy integrations; ordinary
+      // registration and startup migration no longer produce pending rows.
       if (body.status === 'cancelled') {
-        if (!ACTIVE.has(previous.status)) fail('대기 또는 승인 상태의 휴가만 취소할 수 있습니다.', 409);
+        if (!ACTIVE.has(previous.status)) fail('등록된 휴가만 취소할 수 있습니다.', 409);
       } else if (previous.status !== 'pending') fail('대기 중인 휴가만 승인하거나 반려할 수 있습니다.', 409);
       if (body.status === 'approved') {
         const employee = employeeExists(previous.employee_id);

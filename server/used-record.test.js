@@ -85,12 +85,12 @@ test('Saturday and Sunday support annual leave, morning half-days, and afternoon
   }
 });
 
-test('ordinary pending requests also allow weekend ranges and opposite weekend half-days', async t => {
+test('ordinary registrations immediately deduct weekend ranges and opposite weekend half-days', async t => {
   const { employee, apply, snapshot } = await fixture(t);
   const staff = await employee();
   const weekend = await apply(staff.id, '2026-11-07', { endDate: '2026-11-08' });
   assert.equal(weekend.status, 201, JSON.stringify(weekend.body));
-  assert.equal(weekend.body.status, 'pending');
+  assert.equal(weekend.body.status, 'approved');
   assert.equal(weekend.body.days, 2);
   const second = await employee();
   assert.equal((await apply(second.id, '2026-11-08', { type: 'half_am' })).status, 201);
@@ -98,8 +98,9 @@ test('ordinary pending requests also allow weekend ranges and opposite weekend h
   assert.equal((await apply(second.id, '2026-11-08', { type: 'half_am' })).status, 409);
   assert.equal((await apply(second.id, '2026-11-08')).status, 409);
   const data = await snapshot();
-  assert.equal(data.employees[0].pendingDays, 2);
-  assert.equal(data.employees[1].pendingDays, 1);
+  assert.equal(data.employees[0].usedDays, 2);
+  assert.equal(data.employees[1].usedDays, 1);
+  assert.ok(data.employees.every(employee => employee.pendingDays === 0));
 });
 
 test('invalid used dates and identifiers return client errors without saving any records', async t => {
@@ -133,14 +134,15 @@ test('used leave cannot predate hiring or cross the employee anniversary', async
   assert.equal(countRequests(), 0);
 });
 
-test('pending reservations and approved used leave both consume the available allowance', async t => {
+test('registered leave and used records share one allowance and cancellation releases it', async t => {
   const { employee, record, apply, request, snapshot, countRequests } = await fixture(t);
   const staff = await employee({ allowanceMode: 'manual', annualAllowance: 1 });
-  const pending = await apply(staff.id, '2026-11-04');
-  assert.equal(pending.status, 201, JSON.stringify(pending.body));
+  const registered = await apply(staff.id, '2026-11-04');
+  assert.equal(registered.status, 201, JSON.stringify(registered.body));
+  assert.equal(registered.body.status, 'approved');
   assert.equal((await record(staff.id, '2026-11-03')).status, 409);
   assert.equal(countRequests(), 1);
-  assert.equal((await request('PATCH', `/api/requests/${pending.body.id}`, { status: 'rejected' })).status, 200);
+  assert.equal((await request('PATCH', `/api/requests/${registered.body.id}`, { status: 'cancelled' })).status, 200);
   assert.equal((await record(staff.id, '2026-11-03')).status, 201);
   assert.equal((await record(staff.id, '2026-11-04')).status, 409);
   const data = await snapshot();
@@ -188,7 +190,7 @@ test('backdated new-hire records use chronological monthly credits instead of ch
   assert.equal((await snapshot()).employees[1].usedDays, 2);
 });
 
-test('weekend overlaps with pending and approved leave are blocked while opposite halves can share a date', async t => {
+test('weekend overlaps with registered leave are blocked while opposite halves can share a date', async t => {
   const { employee, record, apply } = await fixture(t, '2026-11-10');
   const staff = await employee();
   assert.equal((await apply(staff.id, '2026-11-07')).status, 201);

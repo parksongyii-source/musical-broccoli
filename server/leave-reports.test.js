@@ -20,9 +20,10 @@ async function fixture(t) {
     const result = await request('POST', '/api/requests/record-used', { employeeId, startDate, type: 'annual', ...overrides });
     assert.equal(result.status, 201, JSON.stringify(result.body)); return result.body;
   }
-  async function pending(employeeId, startDate, overrides = {}) {
+  async function register(employeeId, startDate, overrides = {}) {
     const result = await request('POST', '/api/requests', { employeeId, startDate, endDate: startDate, type: 'annual', ...overrides });
-    assert.equal(result.status, 201, JSON.stringify(result.body)); return result.body;
+    assert.equal(result.status, 201, JSON.stringify(result.body));
+    assert.equal(result.body.status, 'approved'); return result.body;
   }
   async function reports(query = '?asOf=2026-11-09&month=2026-11') {
     const result = await request('GET', '/api/leave-reports' + query);
@@ -32,7 +33,7 @@ async function fixture(t) {
     app.locals.db.prepare(`INSERT INTO requests(employee_id,start_date,end_date,type,days,reason,status,created_at,review_note,day_policy)
       VALUES(?,?,?,?,?,'보존된 자료 통계 검증',?,'2026-11-09T00:00:00.000Z','',?)`).run(employeeId, startDate, endDate, type, days, status, policy);
   }
-  return { app, request, employee, record, pending, reports, insertStored };
+  return { app, request, employee, record, register, reports, insertStored };
 }
 
 test('empty reports return the selected dates, zero totals and no invented percentage', async t => {
@@ -50,49 +51,49 @@ test('empty reports return the selected dates, zero totals and no invented perce
 });
 
 test('team and overall usage percentages use summed allowances rather than averaging personal rates', async t => {
-  const { employee, record, pending, reports } = await fixture(t);
+  const { employee, record, register, reports } = await fixture(t);
   const first = await employee({ name: '요양 하나', annualAllowance: 15 });
   const second = await employee({ name: '요양 둘', annualAllowance: 25 });
   const nurse = await employee({ name: '간호 직원', department: '간호팀', annualAllowance: 20 });
   await record(first.id, '2026-11-01', { endDate: '2026-11-06' });
   await record(second.id, '2026-11-01', { endDate: '2026-11-05' });
   await record(nurse.id, '2026-11-07', { endDate: '2026-11-08' });
-  await pending(first.id, '2026-11-08', { type: 'half_pm' });
+  await register(first.id, '2026-11-08', { type: 'half_pm' });
   const result = await reports();
   const team = result.teams.find(row => row.department === '요양팀');
   assert.equal(team.employeeCount, 2);
   assert.equal(team.annualAllowance, 40);
-  assert.equal(team.usedDays, 11);
-  assert.equal(team.pendingDays, 0.5);
-  assert.equal(team.remainingDays, 29);
-  assert.equal(team.usageRate, 27.5);
-  assert.equal(team.monthUsedDays, 11);
+  assert.equal(team.usedDays, 11.5);
+  assert.equal(team.pendingDays, 0);
+  assert.equal(team.remainingDays, 28.5);
+  assert.equal(team.usageRate, 28.8);
+  assert.equal(team.monthUsedDays, 11.5);
   assert.equal(team.monthUsedEmployeeCount, 2);
-  assert.equal(result.employees.find(row => row.id === first.id).usageRate, 40);
+  assert.equal(result.employees.find(row => row.id === first.id).usageRate, 43.3);
   assert.equal(result.employees.find(row => row.id === second.id).usageRate, 20);
   assert.equal(result.summary.annualAllowance, 60);
-  assert.equal(result.summary.usedDays, 13);
-  assert.equal(result.summary.usageRate, 21.7);
+  assert.equal(result.summary.usedDays, 13.5);
+  assert.equal(result.summary.usageRate, 22.5);
   assert.equal(result.summary.monthUsedEmployeeCount, 3);
 });
 
 test('monthly team participation counts one employee once and excludes cancelled and rejected leave from usage', async t => {
-  const { employee, record, pending, request, reports } = await fixture(t);
+  const { employee, record, register, request, reports, insertStored } = await fixture(t);
   const person = await employee();
-  const other = await employee({ name: '대기 직원' });
+  const other = await employee({ name: '다른 직원' });
   await record(person.id, '2026-11-08', { type: 'half_am' });
   await record(person.id, '2026-11-08', { type: 'half_pm' });
   const cancelled = await record(person.id, '2026-11-07');
   await request('PATCH', `/api/requests/${cancelled.id}`, { status: 'cancelled' });
-  const rejected = await pending(person.id, '2026-11-06');
-  await request('PATCH', `/api/requests/${rejected.id}`, { status: 'rejected' });
-  await pending(other.id, '2026-11-09');
+  // A rejection from a previous app version remains an audit-only row.
+  insertStored(person.id, '2026-11-06', '2026-11-06', 1, { status: 'rejected' });
+  await register(other.id, '2026-11-09');
   const result = await reports();
-  assert.equal(result.summary.usedDays, 1);
-  assert.equal(result.summary.monthUsedDays, 1);
-  assert.equal(result.summary.monthPendingDays, 1);
-  assert.equal(result.summary.monthUsedEmployeeCount, 1);
-  assert.equal(result.teams[0].monthUsedEmployeeCount, 1);
+  assert.equal(result.summary.usedDays, 2);
+  assert.equal(result.summary.monthUsedDays, 2);
+  assert.equal(result.summary.monthPendingDays, 0);
+  assert.equal(result.summary.monthUsedEmployeeCount, 2);
+  assert.equal(result.teams[0].monthUsedEmployeeCount, 2);
 });
 
 test('monthly report clips legacy weekdays, includes holidays and weekend halves, and spans earlier anniversary periods', async t => {
