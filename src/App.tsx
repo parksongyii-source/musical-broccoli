@@ -3,8 +3,9 @@ import BulkImport from './BulkImport';
 import EmployeePicker from './EmployeePicker';
 import QuickUsedRecord from './QuickUsedRecord';
 import MonthlyHistory from './MonthlyHistory';
+import LeaveReports, { type ReportMode } from './LeaveReports';
 import { searchEmployees, sortEmployeesByName, normalizeEmployeeSearch } from './employeeSearch';
-import { ArrowDownRight, ArrowRight, ArrowUpRight, CalendarDays, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Coffee, Download, LayoutDashboard, Leaf, Pencil, Plus, Search, ShieldCheck, Sparkles, UsersRound, X } from 'lucide-react';
+import { ArrowDownRight, ArrowRight, ArrowUpRight, BarChart3, CalendarDays, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Coffee, Download, LayoutDashboard, Leaf, Pencil, Plus, Search, ShieldCheck, Sparkles, UsersRound, X } from 'lucide-react';
 
 type AllowanceMode = 'auto' | 'manual';
 type Entitlement = { automaticAllowance: number; completedYears: number; completedMonths: number; calculationBasis: string; nextAccrualDate?: string | null; periodStart: string; periodEnd: string; allowanceYear: number };
@@ -14,11 +15,11 @@ type Status = 'pending' | 'approved' | 'rejected' | 'cancelled';
 type Request = { id: number; employeeId: number; employeeName: string; department: string; startDate: string; endDate: string; type: LeaveType; days: number; reason: string; status: Status; createdAt: string; reviewNote: string; includesWeekends?: boolean };
 type Bootstrap = { year: number; asOf: string; employees: Employee[]; requests: Request[] };
 type DesktopInfo = { standalone: boolean; quitToken?: string; dataDirectory?: string };
-type Page = 'dashboard' | 'employees' | 'requests' | 'calendar' | 'history';
+type Page = 'dashboard' | 'employees' | 'requests' | 'calendar' | 'history' | 'reports';
 type Modal = { type: 'request'; employeeId?: number } | { type: 'employee'; employee?: Employee } | { type: 'review'; request: Request; status: 'rejected' | 'cancelled' } | null;
 const statusLabels: Record<Status, string> = { pending: '승인 대기', approved: '승인 완료', rejected: '반려', cancelled: '취소' };
 const typeLabels: Record<LeaveType, string> = { annual: '연차', half_am: '오전 반차', half_pm: '오후 반차' };
-const titles: Record<Page, string> = { dashboard: '대시보드', employees: '직원 관리', requests: '휴가 내역', calendar: '휴가 캘린더', history: '직원별 월별 내역' };
+const titles: Record<Page, string> = { dashboard: '대시보드', employees: '직원 관리', requests: '휴가 내역', calendar: '휴가 캘린더', history: '직원별 월별 내역', reports: '연차 통계' };
 const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul' }).format(new Date());
 const currentYear = Number(today.slice(0, 4));
 const currentMonth = Number(today.slice(5, 7)) - 1;
@@ -59,6 +60,8 @@ export default function App() {
   const [historyEmployeeId, setHistoryEmployeeId] = useState('');
   const [historyMonth, setHistoryMonth] = useState(today.slice(0, 7));
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [reportMode, setReportMode] = useState<ReportMode>('teams');
+  const [reportMonth, setReportMonth] = useState(today.slice(0, 7));
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [desktop, setDesktop] = useState<DesktopInfo>({ standalone: false });
@@ -91,7 +94,8 @@ export default function App() {
       setConfirmQuit(false);
     } finally { setQuitting(false); }
   }
-  function navigate(next: Page) { setPage(next); setSearch(''); setDepartment('all'); setStatusFilter('all'); }
+  function navigate(next: Page) { setPage(next); setSearch(''); setDepartment('all'); setStatusFilter('all'); if (next === 'reports') { setReportMode('teams'); setReportMonth(asOf.slice(0, 7)); } }
+  function openReports(mode: ReportMode) { navigate('reports'); setReportMode(mode); }
   async function mutate(path: string, method: string, payload: unknown, success: string) {
     setBusy(true);
     try {
@@ -111,7 +115,7 @@ export default function App() {
   const approved = requests.filter(r => r.status === 'approved');
   const used = employees.reduce((sum, e) => sum + e.usedDays, 0);
   const allowance = employees.reduce((sum, e) => sum + e.annualAllowance, 0);
-  const usage = allowance ? Math.round(used / allowance * 100) : 0;
+  const usage = allowance ? Math.round(used / allowance * 1000) / 10 : null;
   const todayOff = approved.filter(r => r.startDate <= asOf && r.endDate >= asOf && (r.includesWeekends !== false || ![0, 6].includes(new Date(`${asOf}T00:00:00Z`).getUTCDay())));
   const upcoming = approved.filter(r => r.endDate >= asOf).sort((a, b) => a.startDate.localeCompare(b.startDate));
   const departments = [...new Set(employees.map(e => e.department))].sort();
@@ -129,7 +133,7 @@ export default function App() {
   function openHistory(employeeId: string, selectedMonth = asOf.slice(0, 7)) {
     setHistoryEmployeeId(employeeId); setHistoryMonth(selectedMonth); navigate('history');
   }
-  const nav = [{ page: 'dashboard' as Page, icon: LayoutDashboard, name: '대시보드' }, { page: 'employees' as Page, icon: UsersRound, name: '직원 관리' }, { page: 'history' as Page, icon: Clock3, name: '직원별 월별 내역' }, { page: 'requests' as Page, icon: CalendarDays, name: '휴가 내역' }, { page: 'calendar' as Page, icon: CalendarDays, name: '휴가 캘린더' }];
+  const nav = [{ page: 'dashboard' as Page, icon: LayoutDashboard, name: '대시보드' }, { page: 'employees' as Page, icon: UsersRound, name: '직원 관리' }, { page: 'reports' as Page, icon: BarChart3, name: '연차 통계' }, { page: 'history' as Page, icon: Clock3, name: '직원별 월별 내역' }, { page: 'requests' as Page, icon: CalendarDays, name: '휴가 내역' }, { page: 'calendar' as Page, icon: CalendarDays, name: '휴가 캘린더' }];
   if (closed) return <main className="desktop-closed"><span className="brand-mark"><Leaf size={28} /></span><h1>온휴를 종료했습니다.</h1><p>직원과 휴가 자료가 이 컴퓨터에 저장되었습니다.<br />이 브라우저 탭을 닫으셔도 됩니다.</p><p>다시 사용하려면 Onhyu.exe를 더블클릭하세요.</p></main>;
   return <div className="app-shell">
     <aside className="sidebar">
@@ -142,15 +146,16 @@ export default function App() {
     <main className="main-area">
       <header className="topbar"><div className="topbar-breadcrumb">워크스페이스 <ChevronRight size={13} /><strong>{titles[page]}</strong></div><div className="topbar-actions"><span className="demo-tag"><span />관리자용 · 입사일 기준</span><label className="year-select"><CalendarDays size={15} /><span>기준일</span><input type="date" aria-label="조회 기준일" value={asOf} onChange={e => { if (e.target.value) setAsOf(e.target.value); }} /></label></div></header>
       <div className="page-content">
-        <div className="page-heading"><div><div className="eyebrow">{page === 'dashboard' ? prettyToday : `입사일 기준 · ${asOf.replaceAll('-', '.')}`}</div><h1>{page === 'dashboard' ? '우리 팀의 쉼을 한눈에' : titles[page]}{page === 'dashboard' && <span className="heading-leaf">🌿</span>}</h1><p>{page === 'dashboard' ? '입사일 기준으로 직원들의 휴가와 남은 연차를 관리하세요.' : page === 'employees' ? '입사일을 입력하면 근속기간에 맞는 연차가 자동 계산됩니다.' : page === 'requests' ? '기준일에 해당하는 직원별 연차 기간의 휴가 내역입니다.' : page === 'history' ? '직원 이름과 월을 고르면 사용한 날짜를 한눈에 볼 수 있습니다.' : '기준일에 해당하는 직원별 연차 기간의 일정을 확인하세요.'}</p></div><div className="heading-actions">{page === 'employees' ? <><button className="button secondary" onClick={() => setBulkOpen(true)}><UsersRound size={17} />직원 일괄 등록</button><button className="button primary" onClick={() => setModal({ type: 'employee' })}><Plus size={17} />직원 등록</button></> : <button className="button primary" onClick={() => setModal({ type: 'request' })} disabled={!employees.length || loading}><Plus size={17} />휴가 등록</button>}</div></div>
+        <div className="page-heading"><div><div className="eyebrow">{page === 'dashboard' ? prettyToday : `입사일 기준 · ${asOf.replaceAll('-', '.')}`}</div><h1>{page === 'dashboard' ? '우리 팀의 쉼을 한눈에' : titles[page]}{page === 'dashboard' && <span className="heading-leaf">🌿</span>}</h1><p>{page === 'dashboard' ? '입사일 기준으로 직원들의 휴가와 남은 연차를 관리하세요.' : page === 'employees' ? '입사일을 입력하면 근속기간에 맞는 연차가 자동 계산됩니다.' : page === 'requests' ? '기준일에 해당하는 직원별 연차 기간의 휴가 내역입니다.' : page === 'history' ? '직원 이름과 월을 고르면 사용한 날짜를 한눈에 볼 수 있습니다.' : page === 'reports' ? '팀별 사용 현황과 직원별 연차 발생일·사용률을 확인하세요.' : '기준일에 해당하는 직원별 연차 기간의 일정을 확인하세요.'}</p></div><div className="heading-actions">{page === 'employees' ? <><button className="button secondary" onClick={() => setBulkOpen(true)}><UsersRound size={17} />직원 일괄 등록</button><button className="button primary" onClick={() => setModal({ type: 'employee' })}><Plus size={17} />직원 등록</button></> : <button className="button primary" onClick={() => setModal({ type: 'request' })} disabled={!employees.length || loading}><Plus size={17} />휴가 등록</button>}</div></div>
         {page === 'dashboard' && <QuickUsedRecord employees={employees} asOf={asOf} onSaved={async (date, message, employeeId) => { const selectedEmployee = employees.find(employee => String(employee.id) === employeeId); const viewDate = selectedEmployee && date >= selectedEmployee.periodStart && date <= selectedEmployee.periodEnd ? asOf : date; setAsOf(viewDate); await load(viewDate); setHistoryRefreshKey(value => value + 1); setToast({ text: message }); }} onHistory={openHistory} />}
-        {loadError ? <div className="panel"><Empty>{loadError}<br /><button className="button secondary" onClick={() => { setLoading(true); void load(); }}>다시 시도</button></Empty></div> : loading ? <div className="loading-state" role="status"><span className="spinner" />우리 팀의 휴가를 불러오고 있어요.</div> : <>
+        {page === 'reports' && <LeaveReports asOf={asOf} month={reportMonth} onMonthChange={setReportMonth} mode={reportMode} onModeChange={setReportMode} onHistory={openHistory} refreshKey={historyRefreshKey} />}
+        {page === 'reports' ? null : loadError ? <div className="panel"><Empty>{loadError}<br /><button className="button secondary" onClick={() => { setLoading(true); void load(); }}>다시 시도</button></Empty></div> : loading ? <div className="loading-state" role="status"><span className="spinner" />우리 팀의 휴가를 불러오고 있어요.</div> : <>
           {page === 'dashboard' && <>
             <div className="stats-grid">
               <Stat icon={<UsersRound size={20} />} tone="green" label="전체 직원" value={employees.length} unit="명" caption="함께 일하는 우리 팀" detail="직원 관리" onClick={() => navigate('employees')} />
               <Stat icon={<Clock3 size={20} />} tone="amber" label="승인 대기" value={pending.length} unit="건" caption={pending.length ? '확인이 필요한 신청이 있어요' : '모든 신청을 확인했어요'} detail="신청 확인" onClick={() => { navigate('requests'); setStatusFilter('pending'); }} />
               <Stat icon={<Coffee size={20} />} tone="blue" label={asOf === today ? "오늘 휴가 중" : "기준일 휴가 중"} value={new Set(todayOff.map(r => r.employeeId)).size} unit="명" caption="재충전 중인 팀원" detail="캘린더 보기" onClick={() => navigate('calendar')} />
-              <Stat icon={<CalendarDays size={20} />} tone="purple" label="팀 연차 사용률" value={usage} unit="%" caption={`총 ${dayCount(allowance)}일 중 ${dayCount(used)}일 승인`} detail="입사일별 해당 기간 기준" />
+              <Stat icon={<CalendarDays size={20} />} tone="purple" label="연차 사용률" value={usage} unit="%" caption={`총 ${dayCount(allowance)}일 중 ${dayCount(used)}일 승인`} detail="개인별 보기" wholeCard onClick={() => openReports('usage')} />
             </div>
             <div className="dashboard-grid">
               <section className="panel approval-panel"><div className="panel-header"><div><div className="panel-title">승인을 기다리고 있어요 <span className="count-chip">{pending.length}</span></div><p className="panel-description">팀원들의 휴가 신청을 확인해 주세요.</p></div><button className="panel-link" onClick={() => { navigate('requests'); setStatusFilter('pending'); }}>전체 보기 <ChevronRight size={14} /></button></div><div className="approval-list">{pending.length ? pending.slice(0, 4).map(r => <div className="approval-row" key={r.id}><Avatar name={r.employeeName} id={r.employeeId} /><div className="person-details"><div className="person-name">{r.employeeName}<span>{r.department}</span></div><div className="person-meta">{dateRange(r)} <span className="meta-dot">·</span> {typeLabels[r.type]} {dayCount(r.days)}일</div><p className="request-reason">{r.reason || '사유가 입력되지 않았어요.'}</p></div><div className="row-actions"><button className="button subtle small" disabled={busy} onClick={() => void review(r, 'rejected')}>반려</button><button className="button primary small" disabled={busy} onClick={() => void review(r, 'approved')}><Check size={14} />승인</button></div></div>) : <Empty>기다리는 신청이 없어요.<br />우리 팀의 휴가를 여유롭게 관리해 보세요.</Empty>}</div></section>
@@ -170,12 +175,15 @@ export default function App() {
     </main>
     <nav className="mobile-nav" aria-label="주 메뉴">{nav.map(item => <button key={item.page} className={`mobile-nav-button ${page === item.page ? 'active' : ''}`} aria-current={page === item.page ? 'page' : undefined} onClick={() => navigate(item.page)}><item.icon size={20} /><span>{item.name}</span></button>)}</nav>
     {toast && <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <CircleHelp size={18} /> : <CheckCheck size={18} />}{toast.text}<button aria-label="알림 닫기" onClick={() => setToast(null)}><X size={15} /></button></div>}
-    {bulkOpen && <BulkImport asOf={asOf} onClose={() => setBulkOpen(false)} onImported={async count => { await load(); setBulkOpen(false); setPage('employees'); setSearch(''); setDepartment('all'); setToast({ text: `${count}명을 등록했습니다.` }); }} />}
+    {bulkOpen && <BulkImport asOf={asOf} onClose={() => setBulkOpen(false)} onImported={async count => { await load(); setHistoryRefreshKey(value => value + 1); setBulkOpen(false); setPage('employees'); setSearch(''); setDepartment('all'); setToast({ text: `${count}명을 등록했습니다.` }); }} />}
     {modal && <FormModal modal={modal} employees={employees} asOf={asOf} busy={busy} onClose={() => setModal(null)} onSubmit={async (path, method, payload, success) => { await mutate(path, method, payload, success); setModal(null); }} />}
     {confirmQuit && <div className="modal-backdrop"><section className="modal desktop-quit-dialog" role="alertdialog" aria-modal="true" aria-labelledby="quit-title"><div className="modal-header"><h2 id="quit-title">온휴를 종료할까요?</h2></div><p>등록한 자료는 저장되어 다음 실행 때 다시 열립니다.</p><div className="modal-actions"><button className="button secondary" autoFocus disabled={quitting} onClick={() => setConfirmQuit(false)}>계속 사용</button><button className="button primary" disabled={quitting} onClick={() => void quitDesktop()}>{quitting ? '종료 중…' : '프로그램 종료'}</button></div></section></div>}
   </div>;
 }
-function Stat({ icon, tone, label, value, unit, caption, detail, onClick }: { icon: ReactNode; tone: string; label: string; value: number; unit: string; caption: string; detail: string; onClick?: () => void }) { return <section className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon tone-${tone}`}>{icon}</span></div><div className="stat-value">{dayCount(value)}<span>{unit}</span></div><p className="stat-caption">{caption}</p>{onClick ? <button className="stat-sub" onClick={onClick}>{detail}<ArrowUpRight size={13} /></button> : <span className="stat-sub">{detail}<ArrowDownRight size={13} /></span>}</section>; }
+function Stat({ icon, tone, label, value, unit, caption, detail, onClick, wholeCard = false }: { icon: ReactNode; tone: string; label: string; value: number | null; unit: string; caption: string; detail: string; onClick?: () => void; wholeCard?: boolean }) {
+  const clickable = wholeCard && Boolean(onClick);
+  return <section className={`stat-card${clickable ? ' stat-card-link' : ''}`} role={clickable ? 'button' : undefined} tabIndex={clickable ? 0 : undefined} aria-label={clickable ? `${label} · ${detail}` : undefined} onClick={clickable ? onClick : undefined} onKeyDown={clickable ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onClick?.(); } } : undefined}><div className="stat-top"><span>{label}</span><span className={`stat-icon tone-${tone}`}>{icon}</span></div><div className="stat-value">{value === null ? '—' : dayCount(value)}<span>{unit}</span></div><p className="stat-caption">{caption}</p>{onClick && !clickable ? <button className="stat-sub" onClick={onClick}>{detail}<ArrowUpRight size={13} /></button> : <span className="stat-sub">{detail}{clickable ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}</span>}</section>;
+}
 function SearchBox({ value, setValue, placeholder }: { value: string; setValue: (v: string) => void; placeholder: string }) { return <label className="search-box"><Search size={17} /><input aria-label={placeholder} value={value} onChange={e => setValue(e.target.value)} placeholder={placeholder} />{value && <button aria-label="검색어 지우기" onClick={() => setValue('')}><X size={15} /></button>}</label>; }
 function DepartmentSelect({ departments, value, setValue }: { departments: string[]; value: string; setValue: (v: string) => void }) { return <select className="filter-select" aria-label="부서 필터" value={value} onChange={e => setValue(e.target.value)}><option value="all">전체 부서</option>{departments.map(d => <option key={d}>{d}</option>)}</select>; }
 function Calendar({ year, month, requests }: { year: number; month: number; requests: Request[] }) {

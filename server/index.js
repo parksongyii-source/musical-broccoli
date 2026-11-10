@@ -394,6 +394,66 @@ export function createApp({ dbPath = process.env.DB_PATH || join(ROOT, 'data', '
     res.json({ year, asOf, employees, requests });
   });
 
+  app.get('/api/leave-reports', (req, res) => {
+    const asOf = req.query.asOf ?? today();
+    dateValue(asOf, '조회 기준일');
+    const month = req.query.month ?? asOf.slice(0, 7);
+    if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) fail('조회 월은 YYYY-MM 형식으로 입력해 주세요.');
+    const first = dateValue(`${month}-01`, '조회 월');
+    const monthStart = `${month}-01`;
+    const monthEnd = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+    // The management-period quota and the calendar-month usage are separate
+    // views. A month can include leave from an earlier anniversary period.
+    const monthly = new Map();
+    const rawRequests = db.prepare(`SELECT * FROM requests WHERE status IN ('approved','pending')
+      AND start_date <= ? AND end_date >= ?`).all(monthEnd, monthStart);
+    for (const raw of rawRequests) {
+      const start = raw.start_date > monthStart ? raw.start_date : monthStart;
+      const end = raw.end_date < monthEnd ? raw.end_date : monthEnd;
+      const dates = occupiedDates(raw, start, end);
+      if (!dates.length) continue;
+      const days = raw.type === 'annual' ? dates.length : 0.5;
+      const total = monthly.get(raw.employee_id) ?? { monthUsedDays: 0, monthPendingDays: 0 };
+      if (raw.status === 'approved') total.monthUsedDays += days;
+      else total.monthPendingDays += days;
+      monthly.set(raw.employee_id, total);
+    }
+    const usageRate = (usedDays, assignedDays) => assignedDays > 0 ? Math.round(usedDays / assignedDays * 1000) / 10 : null;
+    const collator = new Intl.Collator('ko', { sensitivity: 'base', numeric: true });
+    const employees = db.prepare('SELECT * FROM employees').all().map(raw => {
+      const employee = employeeView(raw, asOf);
+      return {
+        ...employee,
+        department: employee.department.trim().normalize('NFC') || '미지정',
+        usageRate: usageRate(employee.usedDays, employee.annualAllowance),
+        ...(monthly.get(employee.id) ?? { monthUsedDays: 0, monthPendingDays: 0 }),
+      };
+    }).sort((left, right) => collator.compare(left.name, right.name)
+      || collator.compare(left.department, right.department) || left.id - right.id);
+
+    const emptySummary = () => ({
+      employeeCount: 0, annualAllowance: 0, usedDays: 0, pendingDays: 0,
+      remainingDays: 0, usageRate: null, monthUsedDays: 0,
+      monthPendingDays: 0, monthUsedEmployeeCount: 0,
+    });
+    function accumulate(summary, employee) {
+      summary.employeeCount += 1;
+      for (const key of ['annualAllowance', 'usedDays', 'pendingDays', 'remainingDays', 'monthUsedDays', 'monthPendingDays']) summary[key] += employee[key];
+      if (employee.monthUsedDays > 0) summary.monthUsedEmployeeCount += 1;
+    }
+    const summary = emptySummary();
+    const byDepartment = new Map();
+    for (const employee of employees) {
+      accumulate(summary, employee);
+      if (!byDepartment.has(employee.department)) byDepartment.set(employee.department, { department: employee.department, ...emptySummary() });
+      accumulate(byDepartment.get(employee.department), employee);
+    }
+    summary.usageRate = usageRate(summary.usedDays, summary.annualAllowance);
+    const teams = [...byDepartment.values()].map(team => ({ ...team, usageRate: usageRate(team.usedDays, team.annualAllowance) }))
+      .sort((left, right) => collator.compare(left.department, right.department));
+    res.json({ asOf, month, summary, teams, employees });
+  });
+
   app.get('/api/employees/:id/leave-history', (req, res) => {
     const id = positiveId(req.params.id);
     const employee = employeeExists(id);

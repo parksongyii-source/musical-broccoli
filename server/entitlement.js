@@ -40,6 +40,9 @@ export function calculateEntitlement(joinDate, asOf) {
       automaticAllowance: 0,
       completedYears: 0,
       completedMonths: 0,
+      accrualDate: null,
+      lastAccrualDate: null,
+      grantDateType: 'none',
       calculationBasis: '입사 전 · 발생 연차 0일',
       nextAccrualDate: iso(monthAnchor(joined, 1)),
     };
@@ -53,10 +56,14 @@ export function calculateEntitlement(joinDate, asOf) {
 
   if (completedYears === 0) {
     const earned = Math.min(11, completedMonths);
+    const accrualDate = earned > 0 ? iso(monthAnchor(joined, earned)) : null;
     return {
       automaticAllowance: earned,
       completedYears,
       completedMonths,
+      accrualDate,
+      lastAccrualDate: accrualDate,
+      grantDateType: earned > 0 ? 'monthly' : 'none',
       calculationBasis: `1년 미만 · 개근 가정 ${earned}개월 × 1일`,
       nextAccrualDate: iso(monthAnchor(joined, earned + 1)),
     };
@@ -64,10 +71,14 @@ export function calculateEntitlement(joinDate, asOf) {
 
   const additional = Math.min(10, Math.floor((completedYears - 1) / 2));
   const automaticAllowance = 15 + additional;
+  const accrualDate = iso(monthAnchor(joined, completedYears * 12));
   return {
     automaticAllowance,
     completedYears,
     completedMonths,
+    accrualDate,
+    lastAccrualDate: accrualDate,
+    grantDateType: 'annual',
     calculationBasis: `근속 ${completedYears}년 · 기본 15일 + 가산 ${additional}일${automaticAllowance === 25 ? ' (상한 25일)' : ''}`,
     nextAccrualDate: iso(monthAnchor(joined, (completedYears + 1) * 12)),
   };
